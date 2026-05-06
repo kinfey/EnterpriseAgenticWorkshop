@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/AgentManifest.yaml
+name: skill-testing-harness
+description: >
+  Adversarial Skill-Testing harness on Microsoft Foundry. A managed-style
+  hosted agent that drives DeepSeek-V4-Flash and gpt-5.5 through
+  business-agent / attacker / validator / judge experiments and writes a
+  durable session log.
+metadata:
+  tags:
+    - Agent Framework
+    - AI Agent Hosting
+    - Azure AI AgentServer
+    - Responses Protocol
+    - Skill Testing
+    - Adversarial Evaluation
+template:
+  name: skill-testing-harness
+  kind: hosted
+  protocols:
+    - protocol: responses
+      version: 1.0.0
+  environment_variables:
+    - name: MODEL_DEEPSEEK
+      value: "{{MODEL_DEEPSEEK}}"
+    - name: MODEL_GPT
+      value: "{{MODEL_GPT}}"
+    - name: ORCHESTRATOR_MODEL
+      value: "{{MODEL_GPT}}"
+    - name: SESSION_DIR
+      value: "/tmp/sessions"
+    - name: REQUEST_TIMEOUT
+      value: "180"
+# resources:
+#   # The Foundry deployment that backs MODEL_GPT (also the orchestrator brain).
+#   # `id` must reference a model id present in the Foundry catalogue. Pick one of
+#   # gpt-4.1 / gpt-4.1-mini / gpt-4o / gpt-4o-mini depending on what your
+#   # subscription has provisioned. The previous placeholder `gpt-5.5` is *not*
+#   # in the public catalogue and would make `azd ai agent init` fail with
+#   # "model id not found".
+#   - kind: model
+#     id: gpt-4.1-mini
+#     name: MODEL_GPT
+#   # The Foundry deployment that backs MODEL_DEEPSEEK. Use whichever DeepSeek
+#   # variant your project exposes (e.g. DeepSeek-V3.1, DeepSeek-R1). If DeepSeek
+#   # isn't available in your region, point this at another gpt-4.1 / gpt-4o
+#   # deployment so you still get a two-model A/B comparison.
+#   - kind: model
+#     id: DeepSeek-V3.1
+#     name: MODEL_DEEPSEEK

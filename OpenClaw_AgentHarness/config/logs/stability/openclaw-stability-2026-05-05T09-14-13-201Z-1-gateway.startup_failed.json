@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "generatedAt": "2026-05-05T09:14:13.201Z",
+  "reason": "gateway.startup_failed",
+  "process": {
+    "pid": 1,
+    "platform": "linux",
+    "arch": "arm64",
+    "node": "24.14.0",
+    "uptimeMs": 680
+  },
+  "host": {
+    "hostname": "<redacted-hostname>"
+  },
+  "error": {
+    "name": "Error",
+    "message": "Invalid config at /home/node/.openclaw/openclaw.json. models.providers.github-copilot.baseUrl: Invalid input: expected string, received undefined models.providers.github-copilot.models: Invalid input: expected array, received undefined models.providers.github-copilot: Unrecognized key: \"discovery\" agents.list.0.systemPromptOverride: Invalid input: expected string, received object agents.list.1.systemPromptOverride: Invalid input: expected string, received object agents.list.2.systemPromptOverrid..."
+  },
+  "snapshot": {
+    "generatedAt": "2026-05-05T09:14:13.201Z",
+    "capacity": 1000,
+    "count": 0,
+    "dropped": 0,
+    "events": [],
+    "summary": {
+      "byType": {}
+    }
+  }
+}

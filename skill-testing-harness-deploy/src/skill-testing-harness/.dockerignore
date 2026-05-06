@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+.venv
+venv
+.env
+sessions/
+artifacts/
+*.log
+.git
+.gitignore
+.dockerignore
+README.md
+README.zh.md
+.vscode

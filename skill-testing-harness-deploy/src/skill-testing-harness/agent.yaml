@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+kind: hosted
+name: skill-testing-harness
+protocols:
+  - protocol: responses
+    version: 1.0.0
+resources:
+  cpu: '1'
+  memory: '2Gi'

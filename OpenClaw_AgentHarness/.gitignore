@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local env (contains COPILOT_GITHUB_TOKEN)
+.env
+
+# Agent-generated artifacts (regenerate every run)
+workspace/code/solution.py
+workspace/code/test_solution.py
+workspace/code/RUN_REPORT.md
+
+# OpenClaw runtime state
+workspace/.openclaw/
+workspace/logs/
+
+# OS
+.DS_Store

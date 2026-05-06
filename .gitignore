@@ -1,0 +1,61 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets / local env
+.env
+.env.local
+*.token.json
+
+# Azure Developer CLI
+.azure/
+
+# Office lock files
+~$*.pptx
+~$*.docx
+~$*.xlsx
+
+# Stray empty root dirs left over from local runs
+/config/
+
+# Per-module artifacts (regenerated each run)
+**/artifacts/
+**/sessions/
+*.log
+
+# OpenClaw / CodingAgent runtime state
+CodingAgent/config/credentials/
+CodingAgent/config/logs/
+CodingAgent/config/tasks/
+CodingAgent/config/canvas/
+CodingAgent/config/identity/
+CodingAgent/config/devices/
+CodingAgent/config/agents/*/sessions/
+CodingAgent/config/openclaw.json.bak*
+CodingAgent/config/openclaw.json.last-good
+CodingAgent/workspace/.openclaw/
+CodingAgent/workspace/logs/
+
+OpenClaw_AgentHarness/config/agents/*/sessions/
+OpenClaw_AgentHarness/workspace/.openclaw/
+OpenClaw_AgentHarness/workspace/logs/
+OpenClaw_AgentHarness/workspace/code/.pytest_cache/
+
+# Agent runtime auth/state (never commit)
+**/config/agents/*/agent/auth-profiles.json
+**/config/agents/*/agent/auth-state.json
+**/config/agents/*/agent/models.json
+**/config/workspace/.openclaw/

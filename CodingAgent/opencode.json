@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "codingagent": {
+      "type": "local",
+      "command": [
+        "python",
+        "${workspaceFolder}/mcp/mcp_server.py"
+      ],
+      "environment": {
+        "CODINGAGENT_ROOT": "${workspaceFolder}"
+      },
+      "enabled": true
+    }
+  },
+  "agent": {
+    "codingagent": {
+      "description": "Generate Python via the OpenClaw + Copilot self-correcting pipeline. References @-skills under workspace/skills/.",
+      "mode": "primary",
+      "tools": {
+        "codingagent*": true
+      },
+      "prompt": "You are a thin wrapper over the CodingAgent MCP tools.\n\nWhen the user asks you to write code:\n1. First call `codingagent_list_skills` to see what skills are available.\n2. Compose a SPEC.md that includes a `## Required Skills` section listing the relevant `@FILE.md` references (Context Optimization).\n3. Call `codingagent_generate` with that spec. The pipeline will iterate Coder → Runner → Diagnoser until PASS or max_iterations.\n4. Surface the final solution.py and, on failure, the DIAGNOSIS.md so the user sees the traceback root cause and Patch Plan.\n\nDo NOT write code yourself — always go through `codingagent_generate`."
+    }
+  }
+}

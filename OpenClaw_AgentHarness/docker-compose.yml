@@ -1,0 +1,94 @@
+services:
+  # ── Layer 0: secrets-init — token rotation on each boot ──────────────
+  secrets-init:
+    image: alpine:3.19
+    container_name: openclaw-secrets-init
+    command: ["/bin/sh", "/secrets-init.sh"]
+    volumes:
+      - secrets-vol:/run/secrets
+      - ./security/secrets-init.sh:/secrets-init.sh:ro
+      - ./config:/openclaw-config
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    restart: "no"
+    networks:
+      - harness-net
+
+  # ── OpenClaw Gateway ──────────────────────────────────────────────────
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    ports:
+      - "18789:18789"
+    environment:
+      OPENCLAW_TOKEN_FILE: /run/secrets/gateway-token
+      # GitHub Copilot built-in provider — token must have Copilot access
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN}
+      GH_TOKEN: ${COPILOT_GITHUB_TOKEN}
+      # Force IPv4-style bind, point HOME to a writable location
+      HOME: /home/node
+    volumes:
+      - ./config:/home/node/.openclaw:rw
+      - ./workspace:/home/node/.openclaw/workspace:rw
+      - secrets-vol:/run/secrets:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:18789/health > /dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - harness-net
+
+  # ── Harness orchestrator (the self-loop driver) ──────────────────────
+  harness:
+    build:
+      context: .
+      dockerfile: harness/Dockerfile
+    container_name: openclaw-harness
+    depends_on:
+      openclaw:
+        condition: service_healthy
+    environment:
+      OPENCLAW_GATEWAY: http://openclaw:18789
+      OPENCLAW_TOKEN_FILE: /run/secrets/gateway-token
+      OPENCLAW_CONTAINER: openclaw
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
+    volumes:
+      - ./harness:/app:ro
+      - ./workspace:/workspace:rw
+      - secrets-vol:/run/secrets:ro
+      # Option A: drive the OpenClaw CLI via `docker exec` from inside the harness.
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /app
+    command: ["python", "-u", "orchestrator.py"]
+    restart: "no"
+    networks:
+      - harness-net
+
+volumes:
+  secrets-vol:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=4m,uid=0,gid=0,mode=0700"
+
+networks:
+  harness-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
