@@ -7,14 +7,14 @@
         "mtimeMs": 1778033340000,
         "ctimeMs": 1778033340633.2793,
         "dev": "42",
-        "ino": "1213",
-        "mode": 420,
+        "ino": "14",
+        "mode": 33188,
         "nlink": 1,
         "uid": 0,
         "gid": 0,
         "hasMeta": true,
         "gatewayMode": "local",
-        "observedAt": "2026-05-06T02:09:07.468Z"
+        "observedAt": "2026-05-07T02:26:01.014Z"
       },
       "lastObservedSuspiciousSignature": null,
       "lastPromotedGood": {
@@ -23,14 +23,14 @@
         "mtimeMs": 1778033340000,
         "ctimeMs": 1778033340633.2793,
         "dev": "42",
-        "ino": "1213",
+        "ino": "14",
         "mode": 33188,
         "nlink": 1,
         "uid": 0,
         "gid": 0,
         "hasMeta": true,
         "gatewayMode": "local",
-        "observedAt": "2026-05-06T02:09:02.391Z"
+        "observedAt": "2026-05-07T02:26:01.014Z"
       }
     }
   }
