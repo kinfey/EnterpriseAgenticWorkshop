@@ -6,13 +6,18 @@
     "bind": "lan",
     "auth": {
       "mode": "token",
-      "token": "c7d7e06648a84c33a099b854581f44c6"
+      "token": "4ebe918c636a44829ce42c0e32cf3535"
     },
     "controlUi": {
       "allowedOrigins": [
         "http://localhost:18789",
         "http://127.0.0.1:18789"
       ]
+    },
+    "remote": {
+      "url": "ws://127.0.0.1:18789",
+      "transport": "direct",
+      "token": "4ebe918c636a44829ce42c0e32cf3535"
     }
   },
   "tools": {
@@ -119,6 +124,14 @@
   },
   "meta": {
     "lastTouchedVersion": "2026.5.4",
-    "lastTouchedAt": "2026-05-05T09:20:05.070Z"
+    "lastTouchedAt": "2026-05-05T09:35:27.498Z"
+  },
+  "auth": {
+    "profiles": {
+      "github-copilot:github": {
+        "provider": "github-copilot",
+        "mode": "token"
+      }
+    }
   }
 }

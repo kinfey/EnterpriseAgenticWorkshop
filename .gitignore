@@ -59,3 +59,6 @@ OpenClaw_AgentHarness/workspace/code/.pytest_cache/
 **/config/agents/*/agent/auth-state.json
 **/config/agents/*/agent/models.json
 **/config/workspace/.openclaw/
+
+*.env.bak
+.env.bak
