@@ -1,0 +1,25 @@
+schemaVersion: "1"
+name: skill-testing-harness
+agent: copilot
+workspace: .
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple
+  SESSION_DIR: /home/agent/state/sessions
+  REQUEST_TIMEOUT: "180"
+  COPILOT_USE_LOGGED_IN_USER: "1"
+  MODEL_ASTRA: gpt-6-astra
+  MODEL_SOL: gpt-5.6-sol
+  ORCHESTRATOR_MODEL: gpt-6-astra
+
+sandboxOptions:
+  cpus: 4
+  memory: 8g
+  pullPolicy: missing
+  shareSkills: false
+
+ports:
+  - sandbox: 8088
+    host: 18088
+    protocol: tcp4

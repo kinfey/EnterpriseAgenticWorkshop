@@ -1,13 +1,14 @@
 """Local console runner — same harness, no hosted-agent server.
 
-Drives every test case through both Microsoft Foundry deployments
-(DeepSeek-V4-Flash + GPT-5.5) using the same skills/* the hosted agent uses,
+Drives every test case through GPT-6 Astra and GPT-5.6 Sol using the same
+skills/* the sandbox service uses,
 and prints a Rich comparison table.
 
 Usage:
     python main_local.py                   # full multi-turn + judge
     python main_local.py --only edge-03
-    python main_local.py --model gpt
+    python main_local.py --model astra
+    python main_local.py --model sol
     python main_local.py --no-attack
     python main_local.py --single-turn
     python main_local.py --no-judge
@@ -44,7 +45,7 @@ async def _run_business(model_label: str, prompt: str) -> tuple[str, str | None,
     out = ""
     err: str | None = None
     try:
-        out = await run_business(spec.deployment, prompt)
+        out = await run_business(spec.model_id, prompt)
     except Exception as e:  # noqa: BLE001
         err = f"{type(e).__name__}: {e}"
     return out, err, int((time.time() - t0) * 1000)
@@ -55,7 +56,7 @@ async def run_case_single_turn(case_id: str, model_label: str, use_attack: bool)
     spec = get_model(model_label)
     if use_attack:
         try:
-            user_prompt = await craft_attack(spec.deployment, case.knowledge_point, case.attack_strategy)
+            user_prompt = await craft_attack(spec.model_id, case.knowledge_point, case.attack_strategy)
         except Exception as e:  # noqa: BLE001
             user_prompt = f"请为「{case.knowledge_point}」写一个教育短视频脚本。"
             console.print(f"[yellow]  ! attack agent failed: {e}[/yellow]")
@@ -88,7 +89,7 @@ async def run_case_multi_turn(case_id: str, model_label: str, max_turns: int) ->
     for t in range(1, max_turns + 1):
         try:
             prompt = await next_attack_prompt(
-                spec.deployment, case.knowledge_point, case.attack_strategy,
+                spec.model_id, case.knowledge_point, case.attack_strategy,
                 t, prev_out, prev_pass, prev_score,
             )
         except Exception as e:  # noqa: BLE001
@@ -121,7 +122,7 @@ def _format_record(case, spec, mode, prompt, out, err, dur, overall, score, chec
         "knowledge_point": case.knowledge_point,
         "attack_strategy": case.attack_strategy,
         "model_label": spec.label,
-        "deployment": spec.deployment,
+        "model_id": spec.model_id,
         "mode": mode,
         "user_prompt": prompt,
         "output": out,
@@ -145,7 +146,7 @@ async def run_case(case_id: str, model_label: str, args) -> dict:
     if args.use_judge and not rec["error"] and rec["output"]:
         try:
             spec = get_model(model_label)
-            verdict = await grade(spec.deployment, rec["user_prompt"], rec["output"])
+            verdict = await grade(spec.model_id, rec["user_prompt"], rec["output"])
             rec["rubric"] = {
                 "overall_pass": verdict.overall_pass,
                 "score": verdict.score,
@@ -196,7 +197,7 @@ def render_case_panel(rec: dict) -> None:
 
 
 def render_summary(records: list[dict], use_judge: bool) -> None:
-    table = Table(title="Foundry Format-Consistency Benchmark", show_lines=False)
+    table = Table(title="GitHub Copilot Format-Consistency Benchmark", show_lines=False)
     table.add_column("Case", style="bold")
     table.add_column("Knowledge Point", overflow="fold")
     for m in MODELS:
@@ -247,7 +248,7 @@ def render_summary(records: list[dict], use_judge: bool) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="AgentHarness_HostedAgent local CLI")
     p.add_argument("--only", help="run a single case id, e.g. edge-03")
-    p.add_argument("--model", choices=["deepseek", "gpt", "all"], default="all")
+    p.add_argument("--model", choices=["astra", "sol", "all"], default="all")
     p.add_argument("--no-attack", dest="use_attack", action="store_false")
     p.add_argument("--single-turn", action="store_true")
     p.add_argument("--max-turns", type=int, default=3)
@@ -262,10 +263,10 @@ async def amain() -> int:
     if not cases:
         console.print(f"[red]No cases match --only={args.only}[/red]")
         return 2
-    if args.model == "deepseek":
-        models = [m for m in MODELS if "deepseek" in m.label.lower()]
-    elif args.model == "gpt":
-        models = [m for m in MODELS if "gpt" in m.label.lower()]
+    if args.model == "astra":
+        models = [m for m in MODELS if "astra" in m.label.lower()]
+    elif args.model == "sol":
+        models = [m for m in MODELS if "sol" in m.label.lower()]
     else:
         models = MODELS
 

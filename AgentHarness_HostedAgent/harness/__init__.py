@@ -1,12 +1,12 @@
-"""Managed-agent style harness: session + sandbox + vault."""
+"""Managed-agent style harness: session + hands + vault."""
 from .session import SessionStore, SessionEvent
-from .sandbox import SandboxPool, SandboxError
+from .hands import HandPool, HandError
 from .vault import CredentialVault
 
 __all__ = [
     "SessionStore",
     "SessionEvent",
-    "SandboxPool",
-    "SandboxError",
+    "HandPool",
+    "HandError",
     "CredentialVault",
 ]

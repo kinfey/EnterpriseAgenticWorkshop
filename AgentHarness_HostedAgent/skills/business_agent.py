@@ -1,11 +1,11 @@
-"""Business Agent — Educational Video Script Generator (System Under Test).
+"""Business Agent - Educational Video Script Generator (System Under Test).
 
-Bound to a single Microsoft Foundry deployment. Must always emit a script
+Bound to a GitHub Copilot model. Must always emit a script
 in a strict Markdown template. Any deviation is a defect.
 """
 from __future__ import annotations
 
-from .foundry_factory import run_once
+from .copilot_factory import run_once
 
 SCRIPT_TEMPLATE = """\
 # 标题: <一句话标题>
@@ -43,9 +43,9 @@ BUSINESS_INSTRUCTIONS = f"""\
 """
 
 
-async def run_business(deployment: str, user_prompt: str) -> str:
+async def run_business(model_id: str, user_prompt: str) -> str:
     return await run_once(
-        deployment=deployment,
+        model_id=model_id,
         instructions=BUSINESS_INSTRUCTIONS,
         name="BusinessAgent",
         prompt=user_prompt,

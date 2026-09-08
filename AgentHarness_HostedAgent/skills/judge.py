@@ -1,11 +1,11 @@
-"""LLM-as-judge rubric grader (Foundry-backed)."""
+"""LLM-as-judge rubric grader backed by GitHub Copilot."""
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import dataclass
 
-from .foundry_factory import run_once
+from .copilot_factory import run_once
 
 
 RUBRIC_CHECKS = [
@@ -74,14 +74,14 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
-async def grade(deployment: str, user_prompt: str, business_output: str) -> RubricResult:
+async def grade(model_id: str, user_prompt: str, business_output: str) -> RubricResult:
     request = (
         "【输入 prompt】\n"
         f"{user_prompt}\n\n"
         "【业务 Agent 回答】\n"
         f"{business_output}\n"
     )
-    raw = await run_once(deployment, JUDGE_INSTRUCTIONS, "JudgeAgent", request)
+    raw = await run_once(model_id, JUDGE_INSTRUCTIONS, "JudgeAgent", request)
     parsed = _extract_json(raw)
     if not parsed:
         return RubricResult(

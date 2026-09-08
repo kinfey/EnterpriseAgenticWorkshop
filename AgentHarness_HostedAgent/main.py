@@ -1,31 +1,26 @@
-"""Managed-style hosted agent: an adversarial Skill-Testing harness on Foundry.
+"""Docker-Sandbox-hosted adversarial Skill-Testing harness using GitHub Copilot.
 
 Architecture
 ============
-        ┌──────────────────┐    execute(name, input) -> str    ┌──────────┐
-        │  Orchestrator    │ ──────────────────────────────────▶│  Hands   │
-        │ (brain on        │                                    │ (sandbox)│
-        │  Foundry chat)   │     emit_note / get_events         └──────────┘
-        └─────────┬────────┘
-                  │
-                  ▼
-        ┌──────────────────┐
-        │   SessionStore   │  durable, append-only, external to context window
-        └──────────────────┘
+    Host
+      └── Docker Sandbox microVM
+            ├── FastAPI service + Copilot Orchestrator
+            ├── in-process hands
+            ├── durable sandbox-local SessionStore
+            └── isolated Docker daemon
 
-Hands registered in the sandbox pool (one disposable sandbox per call):
+Hands registered in the in-process hand pool:
 
   - list_test_cases      : enumerate the 10 edge-knowledge cases
-  - run_business_agent   : run business agent on a chosen Foundry deployment
-                           (DeepSeek-V4-Flash or gpt-5.5)
+  - run_business_agent   : run business agent on GPT-6 Astra or GPT-5.6 Sol
   - validate_format      : deterministic format checker (no LLM)
-  - judge_rubric         : LLM-as-judge rubric grader (Foundry)
+  - judge_rubric         : LLM-as-judge rubric grader (GitHub Copilot)
   - craft_attack         : single-shot adversarial prompt
   - next_attack_prompt   : next-turn adversarial prompt with feedback loop
   - run_full_benchmark   : orchestrate all 10 cases × 2 models end-to-end
 
-The orchestrator never sees raw secrets — Foundry creds live in the vault
-and are injected by `DefaultAzureCredential` inside each hand at call time.
+The outer Docker Sandbox supplies the filesystem, process, network, and Docker
+daemon isolation. GitHub Copilot supplies all model inference.
 """
 from __future__ import annotations
 
@@ -41,42 +36,37 @@ try:
 except ImportError:  # python-dotenv is optional in hosted runtime
     pass
 
-from agent_framework import Agent
-from agent_framework.foundry import FoundryChatClient
-from agent_framework_foundry_hosting import ResponsesHostServer
-from azure.identity.aio import DefaultAzureCredential
+from agent_framework.github import GitHubCopilotAgent
+from copilot.session import PermissionHandler
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 
-from harness import SessionStore, SandboxPool, CredentialVault
+from harness import SessionStore, HandPool, CredentialVault
 from skills import (
     MODELS,
-    PROJECT_ENDPOINT,
     TEST_CASES,
     find_case,
     get_model,
     validate,
 )
 from skills.business_agent import run_business
+from skills.copilot_factory import make_copilot_client
 from skills.test_agent import craft_attack as _craft_attack, next_attack_prompt as _next_attack_prompt
 from skills.judge import grade as _grade
-from skills.config import ORCHESTRATOR_MODEL, SESSION_DIR
+from skills.config import ORCHESTRATOR_MODEL, REQUEST_TIMEOUT, SESSION_DIR
 
-if not PROJECT_ENDPOINT:
-    raise RuntimeError(
-        "Set FOUNDRY_PROJECT_ENDPOINT in your .env (Microsoft Foundry project endpoint)."
-    )
-
-# Singletons outside the sandbox boundary --------------------------------------
+# Process singletons inside the Docker Sandbox boundary ------------------------
 SESSIONS = SessionStore(root_dir=SESSION_DIR)
 VAULT = CredentialVault()
-# Optional: any outbound creds the hands might need (none required for Foundry).
-SANDBOX = SandboxPool(vault=VAULT)
+HANDS = HandPool(vault=VAULT)
 
 CURRENT_SESSION_ID = SESSIONS.create_session(
     session_id=os.getenv("SESSION_ID") or str(uuid.uuid4())
 )
 
 
-# Helper: run async coroutine from sync sandbox-tool body. The host event loop
+# Helper: run async coroutine from a synchronous hand body. The host event loop
 # is already running, so we can't asyncio.run; we use a fresh loop in a thread.
 def _run_async(coro):
     import threading
@@ -100,7 +90,7 @@ def _run_async(coro):
     return result.get("value")
 
 
-# ----- Hands (sandbox tools) --------------------------------------------------
+# ----- Hands ------------------------------------------------------------------
 
 def _hand_list_test_cases(_input: dict[str, Any], _vault: CredentialVault) -> str:
     return json.dumps(
@@ -116,7 +106,7 @@ def _hand_run_business(input: dict[str, Any], _vault: CredentialVault) -> str:
     if not isinstance(model, str) or not isinstance(prompt, str):
         return "ERROR: 'model' and 'prompt' (string) are required."
     spec = get_model(model)
-    output = _run_async(run_business(spec.deployment, prompt))
+    output = _run_async(run_business(spec.model_id, prompt))
     return output
 
 
@@ -142,7 +132,7 @@ def _hand_judge_rubric(input: dict[str, Any], _vault: CredentialVault) -> str:
     if not isinstance(model, str) or not user_prompt or not output:
         return "ERROR: 'model', 'user_prompt', 'output' are all required."
     spec = get_model(model)
-    verdict = _run_async(_grade(spec.deployment, user_prompt, output))
+    verdict = _run_async(_grade(spec.model_id, user_prompt, output))
     return json.dumps(
         {
             "overall_pass": verdict.overall_pass,
@@ -162,7 +152,7 @@ def _hand_craft_attack(input: dict[str, Any], _vault: CredentialVault) -> str:
     if case is None:
         return f"ERROR: unknown case_id '{case_id}'."
     spec = get_model(model)
-    prompt = _run_async(_craft_attack(spec.deployment, case.knowledge_point, case.attack_strategy))
+    prompt = _run_async(_craft_attack(spec.model_id, case.knowledge_point, case.attack_strategy))
     return prompt
 
 
@@ -180,7 +170,7 @@ def _hand_next_attack_prompt(input: dict[str, Any], _vault: CredentialVault) -> 
         return f"ERROR: unknown case_id '{case_id}'."
     spec = get_model(model)
     prompt = _run_async(_next_attack_prompt(
-        spec.deployment, case.knowledge_point, case.attack_strategy,
+        spec.model_id, case.knowledge_point, case.attack_strategy,
         turn, prev_output, prev_pass, prev_score,
     ))
     return prompt
@@ -218,11 +208,11 @@ def _run_one_case(case_id: str, model_label: str, max_turns: int,
 
     for t in range(1, max_turns + 1):
         prompt = _run_async(_next_attack_prompt(
-            spec.deployment, case.knowledge_point, case.attack_strategy,
+            spec.model_id, case.knowledge_point, case.attack_strategy,
             t, prev_output, prev_pass, prev_score,
         ))
         try:
-            output = _run_async(run_business(spec.deployment, prompt))
+            output = _run_async(run_business(spec.model_id, prompt))
             err = None
         except Exception as e:  # noqa: BLE001
             output = ""
@@ -254,7 +244,7 @@ def _run_one_case(case_id: str, model_label: str, max_turns: int,
     if use_judge and prev_output:
         try:
             judge_spec = get_model(judge_model)
-            verdict = _run_async(_grade(judge_spec.deployment, final_prompt, prev_output))
+            verdict = _run_async(_grade(judge_spec.model_id, final_prompt, prev_output))
             rubric = {
                 "overall_pass": verdict.overall_pass,
                 "score": verdict.score,
@@ -276,19 +266,19 @@ def _run_one_case(case_id: str, model_label: str, max_turns: int,
 
 
 # Register hands ---------------------------------------------------------------
-SANDBOX.register("list_test_cases", _hand_list_test_cases,
+HANDS.register("list_test_cases", _hand_list_test_cases,
                  description="Return the catalogue of 10 edge-knowledge test cases.")
-SANDBOX.register("run_business_agent", _hand_run_business,
-                 description="Run business script-generator on Foundry (model={DeepSeek-V4-Flash|GPT-5.5}, prompt=str).")
-SANDBOX.register("validate_format", _hand_validate_format,
+HANDS.register("run_business_agent", _hand_run_business,
+                 description="Run business script-generator on Copilot (model={GPT-6 Astra|GPT-5.6 Sol}, prompt=str).")
+HANDS.register("validate_format", _hand_validate_format,
                  description="Deterministic format check on a business-agent output (output=str).")
-SANDBOX.register("judge_rubric", _hand_judge_rubric,
+HANDS.register("judge_rubric", _hand_judge_rubric,
                  description="LLM-as-judge rubric grade (model=, user_prompt=, output=).")
-SANDBOX.register("craft_attack", _hand_craft_attack,
+HANDS.register("craft_attack", _hand_craft_attack,
                  description="Single-shot adversarial prompt for a case (model=, case_id=).")
-SANDBOX.register("next_attack_prompt", _hand_next_attack_prompt,
+HANDS.register("next_attack_prompt", _hand_next_attack_prompt,
                  description="Multi-turn next adversarial prompt (model, case_id, turn, previous_output, previous_pass, previous_score).")
-SANDBOX.register("run_full_benchmark", _hand_run_full_benchmark,
+HANDS.register("run_full_benchmark", _hand_run_full_benchmark,
                  description="Run all cases × all models end-to-end (only?, max_turns?, use_judge?, judge_model?).")
 
 
@@ -298,7 +288,7 @@ def execute(
     name: Annotated[str, "One of: list_test_cases, run_business_agent, validate_format, judge_rubric, craft_attack, next_attack_prompt, run_full_benchmark"],
     input_json: Annotated[str, "JSON-encoded arguments for the tool. Use '{}' if none."],
 ) -> str:
-    """Call any registered 'hand' in a fresh, cattle-style sandbox."""
+    """Call a registered hand inside the Docker Sandbox process."""
     try:
         payload: dict[str, Any] = json.loads(input_json) if input_json else {}
         if not isinstance(payload, dict):
@@ -308,7 +298,7 @@ def execute(
 
     SESSIONS.emit_event(CURRENT_SESSION_ID, "tool_call",
                         {"name": name, "input": VAULT.redact(payload)})
-    result = SANDBOX.execute(name, payload)
+    result = HANDS.execute(name, payload)
     SESSIONS.emit_event(CURRENT_SESSION_ID, "tool_result",
                         {"name": name, "output_preview": result[:1000]})
     return result
@@ -316,13 +306,13 @@ def execute(
 
 def list_tools() -> str:
     """Return the names + descriptions of every 'hand' you can call via execute()."""
-    return json.dumps(SANDBOX.list_tools(), ensure_ascii=False)
+    return json.dumps(HANDS.list_tools(), ensure_ascii=False)
 
 
 def list_models() -> str:
-    """Return the Microsoft Foundry deployments wired into this harness."""
+    """Return the GitHub Copilot models wired into this harness."""
     return json.dumps(
-        [{"label": m.label, "deployment": m.deployment} for m in MODELS],
+        [{"label": m.label, "model_id": m.model_id} for m in MODELS],
         ensure_ascii=False,
     )
 
@@ -350,14 +340,15 @@ def emit_note(
 
 # ----- Orchestrator instructions ----------------------------------------------
 
-INSTRUCTIONS = """You are the commander of an adversarial Skill-Testing experiment (a managed-style hosted agent).
+INSTRUCTIONS = """You are the commander of an adversarial Skill-Testing experiment running inside a Docker Sandbox.
 
 Your environment
 ----------------
 - All of your hands are invoked through `execute(name, input_json)`. Call `list_tools()`
-  first for the catalogue, then `list_models()` to see the wired-in Microsoft Foundry
-  deployments (DeepSeek-V4-Flash + GPT-5.5).
-- Every `execute` runs in a one-shot sandbox; state does not persist across calls.
+  first for the catalogue, then `list_models()` to see the wired-in GitHub Copilot
+  models (GPT-6 Astra + GPT-5.6 Sol).
+- Docker Sandbox provides the isolation boundary. Hand calls run in this process and
+  share no mutable business state; durable experiment state belongs in the session log.
 - Your durable memory is the session log, not the context window. Use `get_events(start, end)`
   to replay any slice; persist key findings with `emit_note(note)`.
 - Any call whose result starts with `ERROR:` is a recoverable error — decide for yourself
@@ -372,7 +363,7 @@ Typical experiment flow
    c. `validate_format` for the deterministic format check;
    d. On PASS, call `next_attack_prompt(turn=2, previous_output=..., previous_pass=true, previous_score=...)`
       to let the attacker switch strategy and try again; typically capped at 3 turns.
-   e. Once done, call `judge_rubric` to have another Foundry model grade against the 5-item rubric.
+   e. Once done, call `judge_rubric` to have another Copilot model grade against the 5-item rubric.
 3. To run everything in one shot — every case × every model across user requests —
    call `run_full_benchmark`.
 4. Persist each case's PASS/FAIL, score curve, and break-points via `emit_note`; end with
@@ -383,32 +374,75 @@ session log carry the details.
 """
 
 
-async def main() -> None:
-    async with DefaultAzureCredential() as credential:
-        client = FoundryChatClient(
-            project_endpoint=PROJECT_ENDPOINT,
-            model=ORCHESTRATOR_MODEL,
-            credential=credential,
-            allow_preview=True,
-        )
-        agent = Agent(
-            client,
-            instructions=INSTRUCTIONS,
-            name="SkillTestingHarness",
-            tools=[execute, list_tools, list_models, get_events, emit_note],
-        )
-        SESSIONS.emit_event(CURRENT_SESSION_ID, "session_start", {
-            "agent": "SkillTestingHarness",
-            "orchestrator_model": ORCHESTRATOR_MODEL,
-            "models_under_test": [m.label for m in MODELS],
-        })
-        print("Skill-Testing Harness running on http://localhost:8088")
-        print(f"Session id: {CURRENT_SESSION_ID}  (log dir: {SESSION_DIR})")
-        print(f"Orchestrator: {ORCHESTRATOR_MODEL}")
-        print(f"Models under test: {', '.join(m.label for m in MODELS)}")
-        server = ResponsesHostServer(agent)
-        await server.run_async()
+class ResponseRequest(BaseModel):
+    input: str
+
+
+app = FastAPI(title="Skill-Testing Harness", version="1.0.0")
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/responses")
+async def responses(request: ResponseRequest) -> dict[str, Any]:
+    if not request.input.strip():
+        raise HTTPException(status_code=400, detail="input must not be empty")
+
+    agent = GitHubCopilotAgent(
+        client=make_copilot_client(),
+        instructions=INSTRUCTIONS,
+        name="SkillTestingHarness",
+        tools=[execute, list_tools, list_models, get_events, emit_note],
+        default_options={
+            "model": ORCHESTRATOR_MODEL,
+            "timeout": REQUEST_TIMEOUT,
+            "on_permission_request": PermissionHandler.approve_all,
+        },
+    )
+    try:
+        async with agent:
+            result = await asyncio.wait_for(
+                agent.run(request.input),
+                timeout=REQUEST_TIMEOUT,
+            )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Copilot request timed out") from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Copilot request failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    response_id = str(uuid.uuid4())
+    text = getattr(result, "text", None) or str(result)
+    SESSIONS.emit_event(CURRENT_SESSION_ID, "response", {
+        "response_id": response_id,
+        "input": request.input,
+        "output_preview": text[:1000],
+    })
+    return {
+        "id": response_id,
+        "object": "response",
+        "model": ORCHESTRATOR_MODEL,
+        "output_text": text.strip(),
+    }
+
+
+def main() -> None:
+    SESSIONS.emit_event(CURRENT_SESSION_ID, "session_start", {
+        "agent": "SkillTestingHarness",
+        "orchestrator_model": ORCHESTRATOR_MODEL,
+        "models_under_test": [m.label for m in MODELS],
+    })
+    print("Skill-Testing Harness listening on sandbox port 8088")
+    print(f"Session id: {CURRENT_SESSION_ID}  (log dir: {SESSION_DIR})")
+    print(f"Orchestrator: {ORCHESTRATOR_MODEL}")
+    print(f"Models under test: {', '.join(m.label for m in MODELS)}")
+    uvicorn.run(app, host="0.0.0.0", port=8088)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
