@@ -1,76 +1,73 @@
-"""LRU (Least Recently Used) cache implementation backed by OrderedDict."""
+"""Provide an O(1) least-recently-used cache."""
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Hashable
-
-_MISSING = -1
+from typing import Any
 
 
 class LRUCache:
-    """Fixed-capacity LRU cache with O(1) average get/put.
-
-    Internal order follows Python's ``OrderedDict`` convention: the most
-    recently used entry is at the end, the least recently used at the front.
-    """
+    """Store a fixed number of values using least-recently-used eviction."""
 
     def __init__(self, capacity: int) -> None:
-        """Initialize the cache.
+        """Initialize a cache with the requested capacity.
 
         Args:
-            capacity: Maximum number of entries. Must be a positive ``int``.
+            capacity: Maximum number of entries the cache may hold.
 
         Returns:
             None.
         """
-        # O(1) time, O(1) space (allocates an empty OrderedDict).
-        if not isinstance(capacity, int) or isinstance(capacity, bool):
-            raise TypeError(f"capacity must be an int, got {type(capacity).__name__}")
-        if capacity <= 0:
-            raise ValueError(f"capacity must be positive, got {capacity}")
-        self._capacity: int = capacity
-        self._data: "OrderedDict[Hashable, Any]" = OrderedDict()
-
-    def get(self, key: Hashable) -> Any:
-        """Fetch a value and mark its key as most recently used.
-
-        Args:
-            key: Hashable key to look up.
-
-        Returns:
-            The stored value, or ``-1`` if the key is not present.
-        """
-        # O(1) average time, O(1) space.
-        if key not in self._data:
-            return _MISSING
-        self._data.move_to_end(key, last=True)
-        return self._data[key]
-
-    def put(self, key: Hashable, value: Any) -> None:
-        """Insert or update a key/value pair, evicting LRU if needed.
-
-        Args:
-            key: Hashable key to insert or update.
-            value: Value to associate with ``key``.
-
-        Returns:
-            None.
-        """
-        # O(1) average time, O(1) space (amortized; cache holds <= capacity items).
-        if key in self._data:
-            self._data[key] = value
-            self._data.move_to_end(key, last=True)
-            return
-        if len(self._data) >= self._capacity:
-            self._data.popitem(last=False)
-        self._data[key] = value
-
-    def __len__(self) -> int:
-        """Return the current number of cached entries."""
         # O(1) time, O(1) space.
-        return len(self._data)
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("capacity must be a positive integer")
 
-    def __contains__(self, key: object) -> bool:
-        """Return whether ``key`` is currently cached (does not affect recency)."""
+        self._capacity = capacity
+        self._items: OrderedDict[Any, Any] = OrderedDict()
+
+    def get(self, key: Any) -> Any:
+        """Return a cached value and mark its key as most recently used.
+
+        Args:
+            key: Key whose cached value should be retrieved.
+
+        Returns:
+            The cached value when present; otherwise, -1.
+        """
         # O(1) average time, O(1) space.
-        return key in self._data
+        if key not in self._items:
+            return -1
+
+        self._items.move_to_end(key)
+        return self._items[key]
+
+    def put(self, key: Any, value: Any) -> None:
+        """Insert or update a value and evict the least-recently-used entry.
+
+        Args:
+            key: Key to insert or update.
+            value: Value to associate with the key.
+
+        Returns:
+            None.
+        """
+        # O(1) average time, O(1) auxiliary space.
+        if key in self._items:
+            self._items.move_to_end(key)
+        self._items[key] = value
+
+        if len(self._items) > self._capacity:
+            self._items.popitem(last=False)
+
+
+if __name__ == "__main__":
+    c = LRUCache(2)
+    c.put(1, 1)
+    c.put(2, 2)
+    assert c.get(1) == 1
+    c.put(3, 3)
+    assert c.get(2) == -1
+    c.put(4, 4)
+    assert c.get(1) == -1
+    assert c.get(3) == 3
+    assert c.get(4) == 4
+    print("OK")

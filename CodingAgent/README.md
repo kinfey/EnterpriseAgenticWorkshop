@@ -1,477 +1,336 @@
-# CodingAgent · Copilot Code-Generation Agent on the OpenClaw Framework
+# CodingAgent · OpenClaw 2.0 on Docker Sandbox
 
-> Drive a **code-generation Agent** inside the [OpenClaw](https://docs.openclaw.ai/) sandbox using GitHub Copilot (default `claude-opus-4.7`). Two core techniques:
->
-> 1. **Context Optimization** — the Coder Agent uses `@FILE.md` references to pull in Skill specs from `workspace/skills/`, injecting only what is actually needed into the context.
-> 2. **Error Correction** — the Runner captures the full Python Traceback, and the Diagnoser Agent specializes in turning that Traceback into an actionable `Patch Plan` that gets fed back to the Coder for the next repair cycle.
->
-> Inspired by, and scaffolded from, the sibling project [`OpenClaw_AgentHarness`](../OpenClaw_AgentHarness/README.md).
+CodingAgent is a GitHub Copilot-powered code-generation and self-correction loop running on **OpenClaw 2.0 (`2026.8.1`)** inside a **Docker Sandbox microVM**.
 
----
+The project uses only these Copilot models:
+
+- Primary: `github-copilot/gpt-5.6-sol`
+- Fallback: `github-copilot/gpt-5.5`
+
+Claude models are no longer configured.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  iteration N                                                             │
-│                                                                          │
-│  Coder      read SPEC.md → parse @SKILL.md refs → load only those Skills │
-│             read DIAGNOSIS.md (if present) → write solution.py           │
-│                                                                          │
-│  Runner     run solution / pytest / smoke_test inside OpenClaw sandbox   │
-│             capture Traceback verbatim → write RUN_LOG.md                │
-│                                                                          │
-│  if PASS → exit 0                                                        │
-│  if FAIL → Diagnoser parses Traceback → writes DIAGNOSIS.md (Patch Plan) │
-│            enter iteration N+1 (Coder reads Patch Plan and fixes)        │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TB
+    User["Developer / GitHub CLI"] --> Script["sandbox.sh"]
+    Browser["Browser"] -->|"127.0.0.1:18790"| PublishedPort["Sandbox port 18790"]
+    Script -->|"sbx create / exec"| SBX
 
-| Agent       | Emoji | Responsibility                                                     | Tool allow-list         |
-|-------------|------|---------------------------------------------------------------------|-------------------------|
-| `coder`     | 🧑‍💻   | Read SPEC + referenced Skills + DIAGNOSIS, write `solution.py`      | `read`, `write`, `edit` |
-| `runner`    | 🏃   | Execute the code, write the full Traceback into `RUN_LOG.md`         | `read`, `write`, `exec` |
-| `diagnoser` | 🩺   | Translate the Traceback into a `Patch Plan` (`DIAGNOSIS.md`)         | `read`, `write`         |
+    subgraph SBX["Docker Sandbox microVM"]
+        Docker["Private Docker daemon"]
+        Init["secrets-init"]
+        Doctor["openclaw doctor --fix"]
+        Pytest["pytest-init"]
+        Gateway["OpenClaw 2.0 Gateway<br/>container port 18789"]
+        Harness["Python orchestrator"]
+        Coder["Coder · GPT-5.6 Sol"]
+        Runner["Runner · GPT-5.6 Sol"]
+        Diagnoser["Diagnoser · GPT-5.6 Sol"]
+        ConfigVol[("config-vol")]
+        SecretsVol[("secrets-vol<br/>tmpfs")]
+        PytestVol[("pytest-vol")]
+        Workspace[("Host workspace<br/>bind mount")]
+        Socket["/var/run/docker.sock<br/>private daemon"]
 
-Only `runner` has `exec`, and `tools.exec.allowedPaths` only whitelists `workspace/code/`.
+        Docker --> Init
+        Init --> ConfigVol
+        Init --> SecretsVol
+        ConfigVol --> Doctor
+        Doctor --> Gateway
+        Pytest --> PytestVol
+        ConfigVol --> Gateway
+        SecretsVol --> Gateway
+        PytestVol --> Gateway
+        Workspace --> Gateway
+        Docker --> Gateway
+        Docker --> Harness
+        Socket --> Harness
+        SecretsVol --> Harness
+        Workspace --> Harness
+        Harness -->|"docker exec + OpenClaw CLI"| Gateway
+        Gateway --> Coder
+        Gateway --> Runner
+        Gateway --> Diagnoser
+        PublishedPort -->|"18790 → 18789"| Gateway
+    end
 
----
-
-## Directory Layout
-
-```
-CodingAgent/
-├── README.md                ← this file
-├── docker-compose.yml       ← secrets-init + openclaw + harness
-├── .env.example             ← copy to .env, then fill in COPILOT_GITHUB_TOKEN
-├── setup.sh                 ← one-shot bootstrap
-├── config/
-│   └── openclaw.json        ← three agent definitions + Copilot Provider
-├── security/
-│   └── secrets-init.sh      ← startup-time Gateway Token rotation
-├── harness/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── openclaw_client.py   ← invokes the OpenClaw CLI via docker exec
-│   └── orchestrator.py      ← self-loop driver (Coder → Runner → Diagnoser)
-└── workspace/
-    ├── AGENTS.md
-    ├── skills/              ← Skill docs used by Context Optimization
-    │   ├── PYTHON_STYLE.md
-    │   ├── ALGO_PATTERNS.md
-    │   ├── ERROR_HANDLING.md
-    │   └── TESTING.md
-    └── code/
-        ├── SPEC.md          ← task definition (with @SKILL.md references)
-        ├── solution.py      ← produced by the Coder
-        ├── RUN_LOG.md       ← produced by the Runner (full Traceback)
-        └── DIAGNOSIS.md     ← produced by the Diagnoser (Patch Plan)
+    Gateway -->|"fallback"| GPT55["GPT-5.5"]
+    Gateway -->|"GitHub Copilot provider"| Copilot["GitHub Copilot API"]
 ```
 
----
+The host runs only `sbx`. Docker Compose, containers, images, volumes, and `/var/run/docker.sock` live inside the isolated microVM. The socket mounted into the harness therefore controls only the sandbox's private Docker daemon.
 
-## Technique 1 · Context Optimization (Skill `@` references)
+### Component responsibilities
 
-The "Required Skills" section inside `workspace/code/SPEC.md`:
+| Layer | Component | Responsibility |
+|-------|-----------|----------------|
+| Host control plane | `sandbox.sh` | Creates or reconnects to the microVM, injects the Copilot token, applies network policy, forwards port `18790`, and runs lifecycle commands |
+| Isolation boundary | Docker Sandbox | Provides the private Docker daemon, filesystem, network, image store, and container runtime |
+| Runtime configuration | `secrets-init` | Copies the tracked credential-free template to `config-vol`, injects the Gateway token, creates per-agent Copilot profiles, and assigns runtime ownership to UID 1000 |
+| OpenClaw migration | `openclaw-init` | Runs `openclaw doctor --fix` against `config-vol` to migrate legacy auth profiles into the OpenClaw 2.0 SQLite secret store |
+| Test toolchain | `pytest-init` | Installs `pytest==8.3.5` from the Microsoft package proxy into `pytest-vol` |
+| Agent runtime | `openclaw` | Hosts Coder, Runner, and Diagnoser and calls GitHub Copilot |
+| Orchestration | `harness` | Calls agents through the OpenClaw CLI, parses OpenClaw 2.0 payload responses, checks artifacts, and controls retry iterations |
+| Shared output | `workspace/` | Keeps the specification, skills, generated implementation, smoke test, run log, and diagnosis visible on the host |
+
+### Trust and persistence boundaries
+
+- `config/openclaw.json` is only a template; live Gateway and Copilot credentials are written to `config-vol`, not to the Git working tree.
+- `secrets-vol` is tmpfs-backed and contains the Gateway token.
+- `pytest-vol` is mounted read-only into OpenClaw after initialization.
+- `openclaw-init` mounts only `config-vol`, so configuration migration cannot rewrite the host workspace.
+- The project workspace is the only host directory shared with the microVM.
+- Port forwarding has two layers: host `18790` → microVM `18790` → OpenClaw container `18789`.
+- OpenClaw's internal `agents.defaults.sandbox.mode` remains `off` because the complete Compose stack already runs inside the stronger Docker Sandbox microVM boundary.
+
+## Pipeline
+
+1. **Coder** reads `workspace/code/SPEC.md`, referenced `@SKILL.md` files, and any previous `DIAGNOSIS.md`, then writes `solution.py`.
+2. **Runner** recreates `smoke_test.py` strictly from the specification, executes it with `python3` or runs an existing pytest suite from the read-only tool volume, and writes the complete output and traceback to `RUN_LOG.md`.
+3. On failure, **Diagnoser** writes a structured patch plan to `DIAGNOSIS.md`.
+4. The next iteration sends the diagnosis back to Coder until the run passes or `MAX_ITERATIONS` is exhausted.
+
+```mermaid
+sequenceDiagram
+    participant Host as sandbox.sh
+    participant SBX as Docker Sandbox
+    participant Gateway as OpenClaw 2.0
+    participant Coder
+    participant Runner
+    participant Diagnoser
+
+    Host->>SBX: deploy
+    SBX->>SBX: secrets-init + pytest-init
+    SBX->>SBX: openclaw doctor --fix
+    SBX->>Gateway: start and wait for health
+    Host->>SBX: run
+    SBX->>Coder: SPEC + referenced skills + prior diagnosis
+    Coder-->>SBX: solution.py
+    SBX->>Runner: execute implementation
+    Runner-->>SBX: RUN_LOG.md
+    alt PASS
+        SBX-->>Host: exit 0
+    else FAIL
+        SBX->>Diagnoser: traceback + solution + spec
+        Diagnoser-->>SBX: DIAGNOSIS.md
+        SBX->>Coder: next iteration with Patch Plan
+    end
+```
+
+`./sandbox.sh deploy` is the only command that reruns configuration and auth initialization. `./sandbox.sh run` uses `docker compose run --rm --no-deps harness`, so a pipeline run does not restart or mutate the healthy Gateway.
+
+## What changed in the OpenClaw 2.0 migration
+
+| Area | Previous implementation | Current implementation |
+|------|-------------------------|------------------------|
+| OpenClaw image | Floating `latest` / older 2026.5 configuration | Pinned official OpenClaw 2.0 image `2026.8.1` |
+| Isolation | Compose on the host Docker daemon | Entire Compose stack inside a Docker Sandbox microVM |
+| Models | Claude primary and fallback models | GPT-5.6 Sol primary with GPT-5.5 fallback |
+| Agent schema | Legacy `agents.list` and `systemPromptOverride` | OpenClaw 2.0 `agents.entries`; task contracts are injected by the orchestrator |
+| Authentication | Runtime credentials written under the tracked config directory | Credential-free template plus private `config-vol`, tmpfs secrets, and SQLite migration |
+| CLI response handling | Legacy top-level reply shapes | OpenClaw 2.0 `result.payloads[].text` parsing |
+| Python execution | Assumed `python` and runtime package installation | Uses `python3` and a pinned, read-only pytest volume |
+| Pipeline lifecycle | Compose dependencies restarted for every run | Initialization occurs during `deploy`; `run` starts only an ephemeral harness |
+| Smoke tests | Reused potentially stale generated tests | Recreated each iteration from the current SPEC and temporary capture files removed |
+
+## Versions
+
+| Component | Version |
+|-----------|---------|
+| OpenClaw 2.0 | `ghcr.io/openclaw/openclaw:2026.8.1` |
+| Docker Sandboxes | `sbx 0.42.0` or later |
+| Primary model | `github-copilot/gpt-5.6-sol` |
+| Fallback model | `github-copilot/gpt-5.5` |
+| Python | `3.12` |
+| pytest | `8.3.5` |
+
+OpenClaw uses date-based release tags. The official [v2026.8.1 release](https://docs.openclaw.ai/releases/2026.8.1) is named **OpenClaw 2.0**.
+
+## Prerequisites
+
+Docker Sandboxes on macOS requires Apple silicon and macOS 14 or later.
+
+```bash
+brew trust docker/tap
+brew install docker/tap/sbx
+# Upgrade an existing installation:
+brew upgrade docker/tap/sbx
+sbx login
+```
+
+Docker Desktop is not required. Each sandbox provides its own Docker daemon, filesystem, and network.
+
+You also need a GitHub account with Copilot access and the GitHub CLI:
+
+```bash
+gh auth status
+```
+
+Model availability depends on the GitHub Copilot plan and organization policy. The account must expose GPT-5.6 Sol and GPT-5.5 in its live model catalog.
+
+## Quick start
+
+```bash
+chmod +x sandbox.sh setup.sh security/secrets-init.sh
+./sandbox.sh deploy
+./sandbox.sh run
+```
+
+`sandbox.sh` reads `COPILOT_GITHUB_TOKEN` from the host environment or obtains it with `gh auth token`. The token is passed into the microVM for the command and is not written into the tracked OpenClaw configuration.
+
+To provide the token explicitly:
+
+```bash
+export COPILOT_GITHUB_TOKEN="$(gh auth token)"
+./sandbox.sh deploy
+```
+
+The deployment creates a sandbox named `codingagent-openclaw`, allocates 4 CPUs and 8 GiB RAM, publishes port `18790`, builds the harness, and starts OpenClaw.
+
+At sandbox creation, `sandbox.sh` allows only the outbound hosts required for GitHub, GHCR, GitHub Copilot, and the Microsoft Python package proxy, including its Azure DevOps package and Blob redirect domains.
+
+Override resources when required:
+
+```bash
+OPENCLAW_SANDBOX_CPUS=6 \
+OPENCLAW_SANDBOX_MEMORY=12g \
+./sandbox.sh deploy
+```
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `./sandbox.sh deploy` | Create the microVM, build images, and start OpenClaw |
+| `./sandbox.sh run` | Execute the complete self-correction pipeline without restarting the Gateway |
+| `./sandbox.sh status` | Show sandbox and Compose status |
+| `./sandbox.sh logs` | Follow OpenClaw logs |
+| `./sandbox.sh shell` | Open a shell in the microVM |
+| `./sandbox.sh down` | Stop Compose services and retain the microVM |
+| `sbx stop codingagent-openclaw` | Stop the microVM |
+| `sbx rm codingagent-openclaw` | Delete the microVM and its internal state |
+
+The OpenClaw Control UI is published at:
+
+```text
+http://127.0.0.1:18790/
+```
+
+## Configure a task
+
+Edit `workspace/code/SPEC.md`. Skill references use this format:
 
 ```markdown
+## Required Skills
+
 - @PYTHON_STYLE.md
 - @ALGO_PATTERNS.md
 - @ERROR_HANDLING.md
 - @TESTING.md
 ```
 
-The orchestrator parses these references with the regex `r"@([A-Za-z0-9_\-]+\.md)"`, verifies that each one actually exists under `workspace/skills/`, and then injects the resulting list into the `# Skill References` section of the Coder Prompt. The Coder system prompt has a hard rule: **read only the listed Skill files; do not load anything else**.
+Referenced files must exist in `workspace/skills/`. Coder loads only the referenced skill documents to keep its context focused.
 
-To add or replace a skill, just drop a new Markdown file under `workspace/skills/` and reference it from `SPEC.md` with `@xxx.md`.
+Generated files are written to `workspace/code/`:
 
----
+| File | Producer | Purpose |
+|------|----------|---------|
+| `solution.py` | Coder | Generated implementation |
+| `smoke_test.py` | Runner | Test generated from the current SPEC |
+| `RUN_LOG.md` | Runner | Command, exit code, stdout, and full traceback |
+| `DIAGNOSIS.md` | Diagnoser | Root cause and patch plan after a failed run |
 
-## Technique 2 · Error Correction (Traceback feedback loop)
+## Model configuration
 
-The Runner system prompt requires `RUN_LOG.md` to contain:
-
-```
-## Result          PASS / FAIL
-## Command         <command run>
-## Exit Code       <integer>
-## Stdout          ```<verbatim>```
-## Stderr / Traceback   ```<verbatim Python traceback>```
-```
-
-The Diagnoser is only invoked on `FAIL`, and emits a `DIAGNOSIS.md` with a fixed structure:
-
-```
-## Failure Signature   <ExceptionType: message>
-## Root Cause          <2-4 sentences>
-## Affected Lines      <file:line — code>
-## Patch Plan          - imperative bullet 1
-                       - imperative bullet 2
-## Regression Risk     <one-liner>
-```
-
-When the next iteration starts, the orchestrator explicitly tells the Coder in its prompt: "read DIAGNOSIS.md and apply each item in the Patch Plan." This turns "let Copilot stare at a Traceback and figure something out" from an ad-hoc one-shot into a **structured repair contract**.
-
----
-
-## How to Run
-
-This project has **two entry points**:
-
-- **A. Run from the command line** (good for first-time validation, CI, or batch-running after editing SPEC.md)
-- **B. Drive it through OpenCode** (good for using it as a tool from inside a chat — see [Using it from OpenCode](#using-it-from-opencode-mcp-integration) below)
-
-Both share the environment setup in [Steps 0–3](#step-0--prerequisites).
-
----
-
-### Step 0 · Prerequisites
-
-| Dependency | Purpose | Verification command |
-|------|------|---------|
-| Docker Desktop ≥ 24 (with compose v2) | Run the secrets-init / openclaw / harness containers | `docker compose version` |
-| GitHub CLI (optional) | One-line way to grab a Copilot token | `gh auth status` |
-| GitHub account with a Copilot subscription | Calls `claude-opus-4.7` | — |
-| Free port 18790 | Public port of the OpenClaw Gateway (offset from OpenClaw_AgentHarness) | `lsof -i :18790` |
-
-> **macOS note**: Docker Desktop must be running, and you need to enable **"Allow the default Docker socket to be used"** in Settings → Advanced, because the harness container mounts `/var/run/docker.sock`.
-
----
-
-### Step 1 · Get a Copilot token and write it into .env
-
-```bash
-cd /Users/lokinfey/Downloads/Samples/CodingAgent
-cp .env.example .env
-# Pick either way to write the token:
-echo "COPILOT_GITHUB_TOKEN=$(gh auth token)" >> .env
-# Or open .env in an editor and replace ghu_replace_me with your token
-```
-
-`.env` needs at least these two entries:
-
-```bash
-COPILOT_GITHUB_TOKEN=ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxx
-MAX_ITERATIONS=4
-```
-
----
-
-### Step 2 · One-shot bootstrap (only needed once)
-
-```bash
-chmod +x setup.sh security/secrets-init.sh
-./setup.sh
-```
-
-`setup.sh` will:
-
-1. Verify that docker / compose are available;
-2. Pull the three base images `alpine:3.19`, `python:3.12-slim`, `ghcr.io/openclaw/openclaw:latest`;
-3. Run `docker compose build harness` to build the harness image;
-4. Set permissions of `config/` and `workspace/` to 700.
-
-When it finishes successfully it prints `Done.`.
-
----
-
-### Step 3 · Prepare a task
-
-The bundled [workspace/code/SPEC.md](workspace/code/SPEC.md) is a "balanced parentheses" sample task that references 4 Skills. You can run it as-is to validate the whole pipeline.
-
-To switch tasks:
-
-```bash
-# 1) Edit the task definition (you can use @FILE.md under ## Required Skills
-#    to reference skills under workspace/skills/)
-$EDITOR workspace/code/SPEC.md
-
-# 2) Wipe the previous artifacts to avoid stale-result confusion
-rm -f workspace/code/solution.py workspace/code/RUN_LOG.md \
-      workspace/code/DIAGNOSIS.md workspace/code/smoke_test.py \
-      workspace/code/test_solution.py
-```
-
-> Want to add a new skill? Drop a `MY_SKILL.md` into [workspace/skills/](workspace/skills) and add `- @MY_SKILL.md` to SPEC.md.
-
----
-
-### Entry point A · Command line
-
-```bash
-# Foreground run (recommended — full logs, exits automatically when done)
-docker compose up --abort-on-container-exit harness
-
-# Or run the gateway in the background and run harness once
-docker compose up -d openclaw
-docker compose run --rm harness
-```
-
-**Expected logs**:
-
-```
-========================================================================
-  CodingAgent — OpenClaw + Copilot self-correcting code generator
-  Workspace: /workspace
-  Max iterations: 4
-========================================================================
-[orchestrator] Skill references in SPEC.md: ['PYTHON_STYLE.md', 'ALGO_PATTERNS.md', 'ERROR_HANDLING.md', 'TESTING.md']
-[openclaw_client] Gateway ready ✓
-
-━━━━━━ Iteration 1/4 ━━━━━━
-[openclaw_client] → agent='coder'    ...
-[coder]    reply: {"status":"done","file":"solution.py","skills_used":[...]}
-[openclaw_client] → agent='runner'   ...
-[runner]   reply: {"status":"FAIL","exit_code":1,"log":"RUN_LOG.md"}
->>> Iteration 1 status: FAIL
-[openclaw_client] → agent='diagnoser' ...
-[diagnoser] reply: {"status":"diagnosed","exception":"AssertionError: ...","file":"DIAGNOSIS.md"}
-
-━━━━━━ Iteration 2/4 ━━━━━━
-[coder]    reply: {"status":"done", ...}
-[runner]   reply: {"status":"PASS","exit_code":0,"log":"RUN_LOG.md"}
->>> Iteration 2 status: PASS
-✅ Solution passed — pipeline complete.
-```
-
-**Exit codes** of the harness process: `0 = PASS`, `1 = exhausted MAX_ITERATIONS while still failing`, `2 = SPEC.md missing`.
-
-**Artifacts** (under `workspace/code/` on the host — you can `cat` them or open them in an editor directly):
-
-| File | Source | Meaning |
-|------|------|------|
-| `solution.py`    | Coder    | The final code |
-| `RUN_LOG.md`     | Runner   | `## Result` `## Stdout` `## Stderr / Traceback` |
-| `DIAGNOSIS.md`   | Diagnoser | Only present if some iteration failed; cleared once the final iteration passes |
-
-**Tuning**:
-
-```bash
-# Override max iterations on the fly (you can also bake it into MAX_ITERATIONS in .env)
-MAX_ITERATIONS=6 docker compose up --abort-on-container-exit harness
-
-# Tail OpenClaw gateway logs separately
-docker logs -f codingagent-openclaw
-```
-
----
-
-### Entry point B · Drive it from OpenCode
-
-See the [Using it from OpenCode (MCP integration)](#using-it-from-opencode-mcp-integration) section below for full details. Shortest path:
-
-```bash
-pip install -r mcp/requirements.txt   # install the MCP SDK
-opencode                              # start OpenCode from the CodingAgent/ directory
-# Then inside OpenCode:
-#   /agent codingagent
-#   write an LRU cache, follow @PYTHON_STYLE.md @ALGO_PATTERNS.md
-```
-
-OpenCode will pick up [opencode.json](opencode.json) automatically and launch the stdio MCP server [mcp/mcp_server.py](mcp/mcp_server.py); the server runs `docker compose up harness` on the host to drive the pipeline once and returns the result back to OpenCode.
-
----
-
-### Step 4 · Re-run / switch task
-
-```bash
-# Edit SPEC.md, wipe artifacts, run again
-$EDITOR workspace/code/SPEC.md
-rm -f workspace/code/solution.py workspace/code/RUN_LOG.md workspace/code/DIAGNOSIS.md
-docker compose up --abort-on-container-exit harness
-```
-
-> Don't want to wipe artifacts manually? The orchestrator already deletes `solution.py` and `RUN_LOG.md` at the start of each iteration; `DIAGNOSIS.md` is only deleted on iteration 1, and is preserved afterwards as feedback. Manual cleanup is just a safety net so you don't read stale artifacts from a previous task.
-
----
-
-## Key Design Points
-
-### Models go through Copilot's built-in Provider
-
-`config/openclaw.json`:
+`config/openclaw.json` uses OpenClaw's built-in [GitHub Copilot provider](https://docs.openclaw.ai/providers/github-copilot):
 
 ```json
-"agents": {
-  "defaults": {
-    "model": {
-      "primary": "github-copilot/claude-opus-4.7",
-      "fallbacks": ["github-copilot/claude-sonnet-4.5"]
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "github-copilot/gpt-5.6-sol",
+        "fallbacks": ["github-copilot/gpt-5.5"]
+      }
     }
   }
 }
 ```
 
-Authentication comes from `COPILOT_GITHUB_TOKEN` (mirrored to `GH_TOKEN` to match the plugin's multi-source detection order).
+GPT models use OpenClaw's OpenAI Responses transport. Live model availability is discovered from the Copilot API for the authenticated account.
 
-### Tool allow-list — directory-precise
+## Credential handling
 
-```json
-"tools": {
-  "exec":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace/code"] },
-  "read":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "write": { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] }
-}
+`config/openclaw.json` is a credential-free template. At startup:
+
+1. `secrets-init` copies the template into the private `config-vol`.
+2. It generates or reuses the Gateway token in the tmpfs-backed `secrets-vol`.
+3. It injects the Gateway token into the runtime configuration.
+4. It creates runtime-only Copilot auth profiles for Coder, Runner, and Diagnoser.
+5. `openclaw doctor --fix` migrates those profiles into OpenClaw 2.0's SQLite-backed secret store before the Gateway starts.
+6. `pytest-init` installs pinned `pytest==8.3.5` from the Microsoft package proxy into a read-only tool volume.
+
+For interactive device authentication, use the command documented by OpenClaw:
+
+```bash
+./sandbox.sh shell
+docker exec -it codingagent-openclaw \
+  node /app/openclaw.mjs models auth login-github-copilot
 ```
 
-Each agent further trims this with `agents.list[].tools.deny` so that Coder/Diagnoser cannot get `exec`, and Runner cannot get `edit`.
+For normal automated runs, `sandbox.sh` supplies `COPILOT_GITHUB_TOKEN`.
 
-### Startup-time token rotation
+## Docker Sandbox isolation
 
-`security/secrets-init.sh` runs before all other services. It generates a fresh Gateway Token, writes it into the tmpfs volume `/run/secrets/gateway-token`, and uses `jq` to inject it into `gateway.auth.token` and `gateway.remote.token` in `config/openclaw.json`.
+Docker Sandboxes gives the project:
 
-### Workspace = single source of truth
+- A dedicated microVM boundary.
+- A private Docker daemon and image store.
+- An isolated filesystem and network.
+- Explicit workspace sharing and port forwarding.
+- Sandbox-specific outbound network policy.
 
-The host's `./workspace/` is mounted into both:
+The project directory is mounted at the same absolute path inside the microVM. Changes under `workspace/` therefore remain visible on the host, while containers and Docker volumes remain isolated inside the sandbox.
 
-- The OpenClaw container at `/home/node/.openclaw/workspace` (Agents read/write)
-- The Harness container at `/workspace` (the orchestrator reads/writes)
+See the official [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/).
 
-So once an Agent writes a file, `orchestrator.py` can immediately validate the result through the host view.
+## OpenCode MCP integration
 
----
+The existing `opencode.json` and `mcp/mcp_server.py` expose the pipeline to OpenCode. Run OpenCode from this directory after deploying the sandbox. Direct command-line execution remains the recommended validation path:
+
+```bash
+./sandbox.sh run
+```
 
 ## Troubleshooting
 
-| Symptom | Investigation |
-|------|------|
-| `harness` is stuck on `Waiting for gateway` | `docker logs codingagent-openclaw` — usually `COPILOT_GITHUB_TOKEN` is empty or expired |
-| `Copilot token exchange failed: HTTP 403` / `model fallback decision: candidate_failed reason=auth` | A PAT straight from `gh auth token` typically does not have the Copilot OAuth scope, so the gateway's live token exchange gets rejected by GitHub. This project's [`security/secrets-init.sh`](security/secrets-init.sh) follows [docs.openclaw.ai → Non-interactive onboarding](https://docs.openclaw.ai/providers/github-copilot#copilot-proxy-plugin-copilot-proxy) and writes the token directly into `config/agents/<id>/agent/auth-profiles.json` so the gateway reads a stored profile (no exchange). If you still get 403, the token itself has no Copilot subscription; switch to device flow:<br/><br/>**One-shot device-flow bootstrap** (see [Copilot credential repair](#copilot-credential-repair) below): `docker compose down -v && docker compose up -d openclaw && docker exec -it codingagent-openclaw node /app/openclaw.mjs models auth login-github-copilot` |
-| The Coder references a Skill that doesn't exist | The orchestrator prints `Skill references in SPEC.md` in its startup logs; non-existent `@FILE.md` entries are dropped silently |
-| The Runner reports `pytest not found` | The system prompt already includes `pip install --quiet pytest` as a fallback; if that still fails, confirm `tools.exec.enabled=true` |
-| The Diagnoser doesn't write DIAGNOSIS.md | The orchestrator prints `⚠️ Diagnoser did not write DIAGNOSIS.md`; the next iteration's Coder will fly blind. Consider raising `MAX_ITERATIONS` |
-| The model doesn't exist | `docker compose exec codingagent-openclaw openclaw models auth login --provider github-copilot --method device`, or change the primary to `github-copilot/claude-sonnet-4.5` |
+| Symptom | Resolution |
+|---------|------------|
+| `sbx` cannot start | Confirm Apple silicon, macOS 14+, `sbx login`, and sufficient memory |
+| Gateway health check fails | Run `./sandbox.sh logs` and inspect OpenClaw startup |
+| Copilot authentication fails | Confirm `gh auth status` and that the account has Copilot access |
+| Model not found | Inspect the live catalog inside the microVM and verify organization policy permits GPT-5.6 Sol |
+| Harness cannot access Docker | Recreate the sandbox; the mounted socket must belong to the microVM daemon |
+| Port `18790` is unavailable | Stop the conflicting process or set a different published port in `sandbox.sh` |
 
----
-
-## Copilot Credential Repair
-
-If the gateway keeps reporting `Copilot token exchange failed: HTTP 403`, the `COPILOT_GITHUB_TOKEN` in your `.env` does not have the Copilot OAuth scope (a token from `gh auth token` is exactly this case by default). Pick one of the two repair paths:
-
-### Option A · Reuse the credentials already logged in by the sibling OpenClaw_AgentHarness
-
-If you previously completed device-flow login in [`../OpenClaw_AgentHarness`](../OpenClaw_AgentHarness/README.md), those credentials can be reused directly:
+Inspect the model catalog:
 
 ```bash
-cd /Users/lokinfey/Downloads/Samples
-
-# 1) Copy the exchanged Copilot API token cache
-mkdir -p CodingAgent/config/credentials
-cp OpenClaw_AgentHarness/config/credentials/github-copilot.token.json \
-   CodingAgent/config/credentials/
-
-# 2) Copy the auth-profile to all three agents
-for AGENT in coder runner diagnoser; do
-  mkdir -p CodingAgent/config/agents/$AGENT/agent
-  cp OpenClaw_AgentHarness/config/agents/coder/agent/auth-profiles.json \
-     CodingAgent/config/agents/$AGENT/agent/
-  cp OpenClaw_AgentHarness/config/agents/coder/agent/auth-state.json \
-     CodingAgent/config/agents/$AGENT/agent/ 2>/dev/null || true
-done
-
-# 3) Sync .env so the next start-up doesn't have secrets-init overwrite this with the old token
-WORKING_TOKEN=$(python3 -c "import json; print(json.load(open('OpenClaw_AgentHarness/config/agents/coder/agent/auth-profiles.json'))['profiles']['github-copilot:github']['token'])")
-sed -i.bak "s|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=$WORKING_TOKEN|" CodingAgent/.env
-
-cd CodingAgent
-docker compose down -v
-docker compose up --abort-on-container-exit harness
+sbx exec codingagent-openclaw \
+  docker exec codingagent-openclaw \
+  node /app/openclaw.mjs models list
 ```
-
-### Option B · Run a one-time device-flow login inside the CodingAgent container (recommended, self-contained)
-
-```bash
-cd /Users/lokinfey/Downloads/Samples/CodingAgent
-
-# 1) Clean start, skip the secrets-init seeding (keep the .env token as ghu_replace_me)
-docker compose down -v
-sed -i.bak 's|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=ghu_replace_me|' .env
-docker compose up -d openclaw
-
-# 2) Interactive login from inside the container (must use -it)
-docker exec -it codingagent-openclaw \
-  node /app/openclaw.mjs models auth login-github-copilot
-# → open the printed URL in a browser, enter the 8-digit code → wait for OK in the terminal
-
-# 3) Reuse main's auth-profile for all three agents
-for AGENT in coder runner diagnoser; do
-  mkdir -p config/agents/$AGENT/agent
-  cp config/agents/main/agent/auth-profiles.json \
-     config/agents/$AGENT/agent/
-done
-
-# 4) Sync .env to the new token (so secrets-init uses a consistent value on restart)
-NEW_TOKEN=$(python3 -c "import json; print(json.load(open('config/agents/main/agent/auth-profiles.json'))['profiles']['github-copilot:github']['token'])")
-sed -i.bak "s|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=$NEW_TOKEN|" .env
-
-# 5) Run the pipeline
-docker compose up --abort-on-container-exit harness
-```
-
-The `ghu_...` token obtained via device flow already carries the Copilot scope, so the gateway's `Copilot token exchange` step succeeds and caches the short-lived Copilot API token in `config/credentials/github-copilot.token.json`. When the cache expires, the gateway re-exchanges using the stored `ghu_...` automatically — you don't have to do anything.
-
----
-
-## Using it from OpenCode (MCP integration)
-
-This repo ships a stdio MCP server that wraps the whole pipeline as a tool callable directly from [OpenCode](https://opencode.ai).
-
-### 1. Install the MCP SDK
-
-```bash
-pip install -r mcp/requirements.txt
-```
-
-### 2. Register it with OpenCode
-
-The repo-root [opencode.json](opencode.json) already declares the server plus a `codingagent` mode agent:
-
-```jsonc
-{
-  "mcp": {
-    "codingagent": {
-      "type": "local",
-      "command": ["python", "${workspaceFolder}/mcp/mcp_server.py"],
-      "environment": { "CODINGAGENT_ROOT": "${workspaceFolder}" }
-    }
-  },
-  "agent": {
-    "codingagent": { "tools": { "codingagent*": true }, ... }
-  }
-}
-```
-
-Keep this file under `CodingAgent/` and start OpenCode from that directory — it will pick up the file automatically. Alternatively, copy the `mcp` block into `~/.config/opencode/config.json` to register the tool globally.
-
-### 3. Tools exposed
-
-| Tool | Purpose |
-|------|------|
-| `codingagent_list_skills`        | List every Skill available under `workspace/skills/` |
-| `codingagent_read_skill(name)`   | Read a Skill's full text (OpenCode users can use it as context reference) |
-| `codingagent_add_skill(name, content)` | Write a new Skill file; future SPECs can reference it as `@<name>.md` |
-| `codingagent_generate(spec, max_iterations?, timeout_seconds?)` | Write the SPEC into `workspace/code/SPEC.md`, run the docker compose pipeline once, return the final `solution.py` / `RUN_LOG.md` / `DIAGNOSIS.md` |
-
-### 4. Use it from OpenCode like this
-
-```text
-> /agent codingagent
-> Write an LRU cache class keyed by str, evicted at the capacity given in the spec.
-> Follow @PYTHON_STYLE.md @ALGO_PATTERNS.md @ERROR_HANDLING.md.
-```
-
-The agent's system prompt makes it call `codingagent_list_skills` first to confirm the available skills, then rewrite the user request into a SPEC with a `## Required Skills` section, and finally call `codingagent_generate` to run the full feedback loop. On failure it returns the Patch Plan from `DIAGNOSIS.md`, and the OpenCode user can drive another round of feedback.
-
-### Caveats
-
-- The MCP server runs **on the host**, and drives the pipeline through `docker compose -f docker-compose.yml up harness`, so the Docker daemon must be available.
-- It is best to run `./setup.sh` once before the first call so that the `harness` image, the token volume and `.env` are all ready.
-- If you run multiple `codingagent_generate` calls concurrently, they will fight over the same workspace; serialize the calls (OpenCode's tool calls are serial by default).
-
----
 
 ## Shutdown
 
 ```bash
-docker compose down -v   # -v also wipes the old token from the secrets volume
+./sandbox.sh down
+sbx stop codingagent-openclaw
+```
+
+To remove all sandbox-local images, containers, and volumes:
+
+```bash
+sbx rm codingagent-openclaw
 ```

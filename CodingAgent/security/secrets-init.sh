@@ -1,30 +1,27 @@
 #!/usr/bin/env sh
-# secrets-init.sh — Generate / reuse OpenClaw Gateway token and inject it
-# into config/openclaw.json (gateway.auth.token + gateway.remote.token).
+# secrets-init.sh — Create runtime OpenClaw config and credentials.
 set -e
 
 SECRETS_DIR="/run/secrets"
 TOKEN_FILE="$SECRETS_DIR/gateway-token"
 OPENCLAW_CONFIG="/openclaw-config/openclaw.json"
+OPENCLAW_TEMPLATE="/config-template/openclaw.json"
 
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
+mkdir -p /openclaw-config
+
+if [ ! -f "$OPENCLAW_TEMPLATE" ]; then
+  echo "[secrets-init] Missing config template: $OPENCLAW_TEMPLATE" >&2
+  exit 1
+fi
+
+cp "$OPENCLAW_TEMPLATE" "$OPENCLAW_CONFIG"
 
 EXISTING_TOKEN=""
 if [ -s "$TOKEN_FILE" ]; then
   EXISTING_TOKEN="$(cat "$TOKEN_FILE")"
 fi
-if [ -z "$EXISTING_TOKEN" ] && [ -f "$OPENCLAW_CONFIG" ]; then
-  apk add --no-cache jq >/dev/null 2>&1 || true
-  if command -v jq >/dev/null 2>&1; then
-    CURR="$(jq -r '.gateway.auth.token // ""' "$OPENCLAW_CONFIG" 2>/dev/null)"
-    case "$CURR" in
-      ""|change_me_to_a_random_secret_string|null) ;;
-      *) EXISTING_TOKEN="$CURR" ;;
-    esac
-  fi
-fi
-
 if [ -n "$EXISTING_TOKEN" ]; then
   echo "[secrets-init] Reusing existing gateway token"
   NEW_TOKEN="$EXISTING_TOKEN"
@@ -55,13 +52,8 @@ echo "$NEW_TOKEN" > "$TOKEN_FILE"
 chmod 444 "$TOKEN_FILE"
 
 # ──────────────────────────────────────────────────────────────────────
-# Seed per-agent Copilot auth profiles so the gateway uses a stored
-# token (no live token-exchange) — this avoids HTTP 403 errors when
-# COPILOT_GITHUB_TOKEN does not have the Copilot OAuth scope, and matches
-# the layout used by docs.openclaw.ai → "Non-interactive onboarding".
-#
-# Reference:
-#   https://docs.openclaw.ai/providers/github-copilot#copilot-proxy-plugin-copilot-proxy
+# Seed runtime-only per-agent Copilot auth profiles. The tracked config remains
+# credential-free; OpenClaw resolves these profiles from config-vol.
 # ──────────────────────────────────────────────────────────────────────
 if [ -n "${COPILOT_GITHUB_TOKEN:-}" ] && [ "$COPILOT_GITHUB_TOKEN" != "ghu_replace_me" ]; then
   AGENTS_BASE="/openclaw-config/agents"
@@ -92,7 +84,10 @@ JSON
   done
   echo "[secrets-init] Seeded Copilot auth profiles for: coder, runner, diagnoser"
 else
-  echo "[secrets-init] WARNING: COPILOT_GITHUB_TOKEN not set or unchanged — gateway will fall back to env-based token exchange (likely HTTP 403)."
+  echo "[secrets-init] COPILOT_GITHUB_TOKEN is required." >&2
+  exit 1
 fi
+
+chown -R 1000:1000 /openclaw-config
 
 echo "[secrets-init] Token written ($(wc -c < $TOKEN_FILE) bytes). Done."

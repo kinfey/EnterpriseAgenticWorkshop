@@ -1,476 +1,336 @@
-# CodingAgent · OpenClaw 框架下的 Copilot 代码生成 Agent
+# CodingAgent · 基于 Docker Sandbox 的 OpenClaw 2.0
 
-> 用 GitHub Copilot（默认 `claude-opus-4.7`）在 [OpenClaw](https://docs.openclaw.ai/) 沙箱内驱动一个**代码生成 Agent**。两个核心技巧：
->
-> 1. **Context Optimization** — Coder Agent 通过 `@FILE.md` 引用 `workspace/skills/` 下的 Skill 定义文档，只把真正用得到的规范注入上下文。
-> 2. **Error Correction** — Runner 捕获完整 Python Traceback，Diagnoser Agent 专门把 Traceback 翻译成可执行的 `Patch Plan`，反馈给 Coder 进行下一轮修复。
->
-> 灵感与脚手架借鉴自同仓库的 [`OpenClaw_AgentHarness`](../OpenClaw_AgentHarness/README.md)。
+CodingAgent 是一个运行于 **Docker Sandbox microVM** 内的代码生成与自修复闭环，底层使用 **OpenClaw 2.0（`2026.8.1`）** 和 GitHub Copilot。
 
----
+项目只使用以下模型：
+
+- 主模型：`github-copilot/gpt-5.6-sol`
+- 备用模型：`github-copilot/gpt-5.5`
+
+配置中已不再使用 Claude 模型。
 
 ## 架构
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  iteration N                                                             │
-│                                                                          │
-│  Coder      读 SPEC.md → 解析 @SKILL.md 引用 → 仅加载被引用的 Skill       │
-│             读 DIAGNOSIS.md（若存在）→ 写 solution.py                    │
-│                                                                          │
-│  Runner     在 OpenClaw sandbox 内运行 solution / pytest / smoke_test    │
-│             逐字捕获 Traceback → 写 RUN_LOG.md                            │
-│                                                                          │
-│  if PASS → 退出 0                                                        │
-│  if FAIL → Diagnoser 解析 Traceback → 写 DIAGNOSIS.md（Patch Plan）       │
-│            进入 iteration N+1（Coder 读取 Patch Plan 修复）              │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+```mermaid
+flowchart TB
+    User["开发者 / GitHub CLI"] --> Script["sandbox.sh"]
+    Browser["浏览器"] -->|"127.0.0.1:18790"| PublishedPort["Sandbox 端口 18790"]
+    Script -->|"sbx create / exec"| SBX
 
-| Agent       | Emoji | 职责                                                  | 工具白名单            |
-|-------------|------|------------------------------------------------------|---------------------|
-| `coder`     | 🧑‍💻   | 读 SPEC + 被引用的 Skill + DIAGNOSIS，写 `solution.py`  | `read`, `write`, `edit` |
-| `runner`    | 🏃   | 执行代码，把完整 Traceback 写进 `RUN_LOG.md`             | `read`, `write`, `exec` |
-| `diagnoser` | 🩺   | 把 Traceback 翻译成 `Patch Plan`（`DIAGNOSIS.md`）       | `read`, `write` |
+    subgraph SBX["Docker Sandbox microVM"]
+        Docker["独立 Docker daemon"]
+        Init["secrets-init"]
+        Doctor["openclaw doctor --fix"]
+        Pytest["pytest-init"]
+        Gateway["OpenClaw 2.0 Gateway<br/>容器端口 18789"]
+        Harness["Python Orchestrator"]
+        Coder["Coder · GPT-5.6 Sol"]
+        Runner["Runner · GPT-5.6 Sol"]
+        Diagnoser["Diagnoser · GPT-5.6 Sol"]
+        ConfigVol[("config-vol")]
+        SecretsVol[("secrets-vol<br/>tmpfs")]
+        PytestVol[("pytest-vol")]
+        Workspace[("宿主机 Workspace<br/>Bind Mount")]
+        Socket["/var/run/docker.sock<br/>独立 daemon"]
 
-只有 `runner` 拥有 `exec`，并且 `tools.exec.allowedPaths` 仅放行 `workspace/code/`。
+        Docker --> Init
+        Init --> ConfigVol
+        Init --> SecretsVol
+        ConfigVol --> Doctor
+        Doctor --> Gateway
+        Pytest --> PytestVol
+        ConfigVol --> Gateway
+        SecretsVol --> Gateway
+        PytestVol --> Gateway
+        Workspace --> Gateway
+        Docker --> Gateway
+        Docker --> Harness
+        Socket --> Harness
+        SecretsVol --> Harness
+        Workspace --> Harness
+        Harness -->|"docker exec + OpenClaw CLI"| Gateway
+        Gateway --> Coder
+        Gateway --> Runner
+        Gateway --> Diagnoser
+        PublishedPort -->|"18790 → 18789"| Gateway
+    end
 
----
-
-## 目录结构
-
-```
-CodingAgent/
-├── README.md                ← 本文件
-├── docker-compose.yml       ← secrets-init + openclaw + harness
-├── .env.example             ← 复制成 .env 后填 COPILOT_GITHUB_TOKEN
-├── setup.sh                 ← 一键引导
-├── config/
-│   └── openclaw.json        ← 三个 Agent 定义 + Copilot Provider
-├── security/
-│   └── secrets-init.sh      ← 启动期 Gateway Token 轮换
-├── harness/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── openclaw_client.py   ← 经 docker exec 调用 OpenClaw CLI
-│   └── orchestrator.py      ← 自循环主控（Coder → Runner → Diagnoser）
-└── workspace/
-    ├── AGENTS.md
-    ├── skills/              ← Context Optimization 用的 Skill 文档
-    │   ├── PYTHON_STYLE.md
-    │   ├── ALGO_PATTERNS.md
-    │   ├── ERROR_HANDLING.md
-    │   └── TESTING.md
-    └── code/
-        ├── SPEC.md          ← 任务定义（含 @SKILL.md 引用）
-        ├── solution.py      ← 由 Coder 产出
-        ├── RUN_LOG.md       ← 由 Runner 产出（完整 Traceback）
-        └── DIAGNOSIS.md     ← 由 Diagnoser 产出（Patch Plan）
+    Gateway -->|"fallback"| GPT55["GPT-5.5"]
+    Gateway -->|"GitHub Copilot Provider"| Copilot["GitHub Copilot API"]
 ```
 
----
+宿主机只运行 `sbx`。Docker Compose、容器、镜像、Volume 和 `/var/run/docker.sock` 全部位于隔离的 microVM 内。因此 Harness 挂载的 Socket 只能控制 Sandbox 内部的 Docker daemon，不能操作宿主机容器。
 
-## 技巧 1 · Context Optimization（Skill `@` 引用）
+### 组件职责
 
-`workspace/code/SPEC.md` 里的「Required Skills」段：
+| 层级 | 组件 | 职责 |
+|------|------|------|
+| 宿主机控制面 | `sandbox.sh` | 创建或重新连接 microVM、注入 Copilot Token、应用网络策略、转发 `18790` 端口并执行生命周期命令 |
+| 隔离边界 | Docker Sandbox | 提供独立 Docker daemon、文件系统、网络、镜像存储和容器运行时 |
+| 运行时配置 | `secrets-init` | 将无凭据模板复制到 `config-vol`，注入 Gateway Token，生成 Agent Copilot Profile，并将运行时目录所有权交给 UID 1000 |
+| OpenClaw 迁移 | `openclaw-init` | 对 `config-vol` 执行 `openclaw doctor --fix`，将旧 Auth Profile 迁移到 OpenClaw 2.0 SQLite Secret Store |
+| 测试工具链 | `pytest-init` | 从 Microsoft 包代理安装 `pytest==8.3.5` 到 `pytest-vol` |
+| Agent 运行时 | `openclaw` | 托管 Coder、Runner、Diagnoser，并调用 GitHub Copilot |
+| 编排层 | `harness` | 通过 OpenClaw CLI 调用 Agent、解析 OpenClaw 2.0 Payload、检查产物并控制重试 |
+| 共享产物 | `workspace/` | 保存 SPEC、Skill、生成代码、Smoke Test、运行日志和诊断，宿主机可直接查看 |
+
+### 信任与持久化边界
+
+- `config/openclaw.json` 只是模板；真实 Gateway 和 Copilot 凭据写入私有 `config-vol`，不会进入 Git 工作区。
+- `secrets-vol` 使用 tmpfs，保存 Gateway Token。
+- `pytest-vol` 初始化后以只读方式挂载到 OpenClaw。
+- `openclaw-init` 只挂载 `config-vol`，配置迁移不能修改宿主机 Workspace。
+- 项目 Workspace 是唯一共享给 microVM 的宿主机目录。
+- 端口经过两层转发：宿主机 `18790` → microVM `18790` → OpenClaw 容器 `18789`。
+- OpenClaw 内部的 `agents.defaults.sandbox.mode` 保持 `off`，因为整个 Compose Stack 已运行在隔离能力更强的 Docker Sandbox microVM 边界内。
+
+## 执行闭环
+
+1. **Coder** 读取 `workspace/code/SPEC.md`、被引用的 `@SKILL.md` 和上一轮 `DIAGNOSIS.md`，生成 `solution.py`。
+2. **Runner** 严格根据 SPEC 重新生成 `smoke_test.py`，使用 `python3` 执行，或通过只读工具 Volume 运行已有 pytest，并将命令、退出码、标准输出和完整 Traceback 写入 `RUN_LOG.md`。
+3. 执行失败时，**Diagnoser** 将根因和修复计划写入 `DIAGNOSIS.md`。
+4. 下一轮 Coder 根据修复计划继续修改，直到通过或达到 `MAX_ITERATIONS`。
+
+```mermaid
+sequenceDiagram
+    participant Host as sandbox.sh
+    participant SBX as Docker Sandbox
+    participant Gateway as OpenClaw 2.0
+    participant Coder
+    participant Runner
+    participant Diagnoser
+
+    Host->>SBX: deploy
+    SBX->>SBX: secrets-init + pytest-init
+    SBX->>SBX: openclaw doctor --fix
+    SBX->>Gateway: 启动并等待健康检查
+    Host->>SBX: run
+    SBX->>Coder: SPEC + 引用的 Skill + 上轮诊断
+    Coder-->>SBX: solution.py
+    SBX->>Runner: 执行实现
+    Runner-->>SBX: RUN_LOG.md
+    alt PASS
+        SBX-->>Host: 退出码 0
+    else FAIL
+        SBX->>Diagnoser: Traceback + Solution + SPEC
+        Diagnoser-->>SBX: DIAGNOSIS.md
+        SBX->>Coder: 下一轮 Patch Plan
+    end
+```
+
+只有 `./sandbox.sh deploy` 会重新执行配置和鉴权初始化。`./sandbox.sh run` 使用 `docker compose run --rm --no-deps harness`，因此执行流水线时不会重启或修改健康运行的 Gateway。
+
+## OpenClaw 2.0 迁移变更
+
+| 范围 | 旧实现 | 当前实现 |
+|------|--------|----------|
+| OpenClaw 镜像 | 浮动 `latest` / 旧版 2026.5 配置 | 固定官方 OpenClaw 2.0 镜像 `2026.8.1` |
+| 隔离方式 | Compose 使用宿主机 Docker daemon | 整个 Compose Stack 运行于 Docker Sandbox microVM |
+| 模型 | Claude 主模型和备用模型 | GPT-5.6 Sol 主模型，GPT-5.5 Fallback |
+| Agent Schema | 旧 `agents.list` 和 `systemPromptOverride` | OpenClaw 2.0 `agents.entries`，任务合同由 Orchestrator 每轮注入 |
+| 鉴权 | 运行时凭据写入被跟踪的配置目录 | 无凭据模板、私有 `config-vol`、tmpfs Secret 和 SQLite 迁移 |
+| CLI 响应 | 旧顶层 Reply 结构 | 解析 OpenClaw 2.0 `result.payloads[].text` |
+| Python 执行 | 假设存在 `python` 并在运行时安装依赖 | 使用 `python3` 和固定版本只读 pytest Volume |
+| 流水线生命周期 | 每次运行都会重启 Compose 依赖 | `deploy` 负责初始化，`run` 只启动临时 Harness |
+| Smoke Test | 可能复用旧任务生成的测试 | 每轮按当前 SPEC 重建，并删除临时捕获文件 |
+
+## 版本
+
+| 组件 | 版本 |
+|------|------|
+| OpenClaw 2.0 | `ghcr.io/openclaw/openclaw:2026.8.1` |
+| Docker Sandboxes | `sbx 0.42.0` 或更高 |
+| 主模型 | `github-copilot/gpt-5.6-sol` |
+| 备用模型 | `github-copilot/gpt-5.5` |
+| Python | `3.12` |
+| pytest | `8.3.5` |
+
+OpenClaw 使用日期形式的版本号。官方 [v2026.8.1 发布说明](https://docs.openclaw.ai/releases/2026.8.1) 将该版本命名为 **OpenClaw 2.0**。
+
+## 环境要求
+
+macOS 使用 Docker Sandboxes 时，需要 Apple silicon 和 macOS 14 或更高版本。
+
+```bash
+brew trust docker/tap
+brew install docker/tap/sbx
+# 已安装时升级：
+brew upgrade docker/tap/sbx
+sbx login
+```
+
+无需 Docker Desktop。每个 Sandbox 都有独立的 Docker daemon、文件系统和网络。
+
+还需要具有 Copilot 权限的 GitHub 账户及 GitHub CLI：
+
+```bash
+gh auth status
+```
+
+模型可用性取决于 Copilot 套餐和组织策略，账户必须能够访问 GPT-5.6 Sol 和 GPT-5.5。
+
+## 快速开始
+
+```bash
+chmod +x sandbox.sh setup.sh security/secrets-init.sh
+./sandbox.sh deploy
+./sandbox.sh run
+```
+
+`sandbox.sh` 优先读取宿主机环境变量 `COPILOT_GITHUB_TOKEN`，未设置时调用 `gh auth token`。Token 只在执行命令时传入 microVM，不会写入被 Git 跟踪的 OpenClaw 配置。
+
+也可以显式设置：
+
+```bash
+export COPILOT_GITHUB_TOKEN="$(gh auth token)"
+./sandbox.sh deploy
+```
+
+默认会创建名为 `codingagent-openclaw` 的 Sandbox，分配 4 CPU、8 GiB 内存，转发 `18790` 端口，构建 Harness 并启动 OpenClaw。
+
+首次创建 Sandbox 时，`sandbox.sh` 只放行 GitHub、GHCR、GitHub Copilot 和 Microsoft Python 包代理所需的出站域名，包括 Azure DevOps Package 与 Blob 重定向域名。
+
+需要更多资源时：
+
+```bash
+OPENCLAW_SANDBOX_CPUS=6 \
+OPENCLAW_SANDBOX_MEMORY=12g \
+./sandbox.sh deploy
+```
+
+## 管理命令
+
+| 命令 | 用途 |
+|------|------|
+| `./sandbox.sh deploy` | 创建 microVM、构建镜像并启动 OpenClaw |
+| `./sandbox.sh run` | 不重启 Gateway，直接执行完整自修复流水线 |
+| `./sandbox.sh status` | 查看 Sandbox 和 Compose 状态 |
+| `./sandbox.sh logs` | 跟踪 OpenClaw 日志 |
+| `./sandbox.sh shell` | 进入 microVM Shell |
+| `./sandbox.sh down` | 停止 Compose 服务但保留 microVM |
+| `sbx stop codingagent-openclaw` | 停止 microVM |
+| `sbx rm codingagent-openclaw` | 删除 microVM 及其内部状态 |
+
+OpenClaw Control UI 地址：
+
+```text
+http://127.0.0.1:18790/
+```
+
+## 配置任务
+
+编辑 `workspace/code/SPEC.md`，通过以下格式引用 Skill：
 
 ```markdown
+## Required Skills
+
 - @PYTHON_STYLE.md
 - @ALGO_PATTERNS.md
 - @ERROR_HANDLING.md
 - @TESTING.md
 ```
 
-Orchestrator 用一段正则 `r"@([A-Za-z0-9_\-]+\.md)"` 把这些引用解析出来，校验它们是否真的存在于 `workspace/skills/`，再把列表注入到 Coder Prompt 的 `# Skill References` 段。Coder 的系统提示里有硬性规则：**只读被列出的 Skill 文件，不许加载其它**。
+引用的文件必须位于 `workspace/skills/`。Coder 只加载明确引用的 Skill，避免无关上下文。
 
-要新增/替换技能，只需在 `workspace/skills/` 下放一个新的 Markdown，再在 `SPEC.md` 用 `@xxx.md` 引用即可。
+生成产物位于 `workspace/code/`：
 
----
+| 文件 | 生成者 | 用途 |
+|------|--------|------|
+| `solution.py` | Coder | 最终实现 |
+| `smoke_test.py` | Runner | 根据当前 SPEC 生成的测试 |
+| `RUN_LOG.md` | Runner | 命令、退出码、标准输出和完整 Traceback |
+| `DIAGNOSIS.md` | Diagnoser | 失败根因和 Patch Plan |
 
-## 技巧 2 · Error Correction（Traceback 闭环）
+## 模型配置
 
-Runner 系统提示要求 `RUN_LOG.md` 必须包含：
-
-```
-## Result          PASS / FAIL
-## Command         <运行命令>
-## Exit Code       <整数>
-## Stdout          ```<verbatim>```
-## Stderr / Traceback   ```<verbatim Python traceback>```
-```
-
-Diagnoser 只在 `FAIL` 时被调用，输出固定结构的 `DIAGNOSIS.md`：
-
-```
-## Failure Signature   <ExceptionType: message>
-## Root Cause          <2-4 sentences>
-## Affected Lines      <file:line — code>
-## Patch Plan          - imperative bullet 1
-                       - imperative bullet 2
-## Regression Risk     <one-liner>
-```
-
-下一轮 Coder 启动时，orchestrator 会在 Prompt 里点名：「读 DIAGNOSIS.md，逐条落实 Patch Plan」。这把「让 Copilot 看 Traceback 自己想办法」从一次随机调用，固化成了**结构化的修复合同**。
-
----
-
-## 如何执行
-
-本项目有 **两种运行入口**：
-
-- **A. 命令行直接跑**（适合首次验证 / CI / 修改 SPEC.md 后批量跑题）
-- **B. 通过 OpenCode 调用**（适合在对话里把它当工具用，详见后文 [给 OpenCode 调用](#给-opencode-调用mcp-集成)）
-
-两种方式共用 [步骤 0–3](#步骤-0--环境前置) 的环境准备。
-
----
-
-### 步骤 0 · 环境前置
-
-| 依赖 | 用途 | 校验命令 |
-|------|------|---------|
-| Docker Desktop ≥ 24（含 compose v2） | 启动 secrets-init / openclaw / harness 三容器 | `docker compose version` |
-| GitHub CLI（可选） | 一行拿到 Copilot token | `gh auth status` |
-| 具备 Copilot 订阅的 GitHub 账户 | 调用 `claude-opus-4.7` | — |
-| 端口 18790 空闲 | OpenClaw Gateway 对外端口（与 OpenClaw_AgentHarness 错开） | `lsof -i :18790` |
-
-> **macOS 提示**：Docker Desktop 必须开着，且需要在 Settings → Advanced 勾上 **"Allow the default Docker socket to be used"**，因为 harness 容器要挂 `/var/run/docker.sock`。
-
----
-
-### 步骤 1 · 拿到 Copilot Token 并写入 .env
-
-```bash
-cd /Users/lokinfey/Downloads/Samples/CodingAgent
-cp .env.example .env
-# 任选一种方式写入 token：
-echo "COPILOT_GITHUB_TOKEN=$(gh auth token)" >> .env
-# 或用编辑器把 .env 里的 ghu_replace_me 替换成你的 token
-```
-
-`.env` 至少需要这两项：
-
-```bash
-COPILOT_GITHUB_TOKEN=ghu_xxxxxxxxxxxxxxxxxxxxxxxxxxx
-MAX_ITERATIONS=4
-```
-
----
-
-### 步骤 2 · 一键引导（只需做一次）
-
-```bash
-chmod +x setup.sh security/secrets-init.sh
-./setup.sh
-```
-
-`setup.sh` 会：
-
-1. 校验 docker / compose 可用；
-2. 拉 `alpine:3.19` `python:3.12-slim` `ghcr.io/openclaw/openclaw:latest` 三个基础镜像；
-3. `docker compose build harness` 生成 harness 镜像；
-4. 给 `config/` `workspace/` 设置 700 权限。
-
-成功结束时会打印 `Done.` 字样。
-
----
-
-### 步骤 3 · 准备任务
-
-仓库自带的 [workspace/code/SPEC.md](workspace/code/SPEC.md) 是「括号匹配」示例题，引用了 4 份 Skill。直接跑就能验证整条链路。
-
-要换题目：
-
-```bash
-# 1) 编辑任务定义（可在 ## Required Skills 段用 @FILE.md 引用 workspace/skills/ 下的技能）
-$EDITOR workspace/code/SPEC.md
-
-# 2) 清掉上一轮的产物，避免误判
-rm -f workspace/code/solution.py workspace/code/RUN_LOG.md \
-      workspace/code/DIAGNOSIS.md workspace/code/smoke_test.py \
-      workspace/code/test_solution.py
-```
-
-> 想新增技能？在 [workspace/skills/](workspace/skills) 下放一个 `MY_SKILL.md`，然后在 SPEC.md 里写 `- @MY_SKILL.md` 即可。
-
----
-
-### 入口 A · 命令行执行
-
-```bash
-# 前台跑（推荐，看完整日志，按完成自动退出）
-docker compose up --abort-on-container-exit harness
-
-# 或后台跑 gateway，然后单独跑一次 harness
-docker compose up -d openclaw
-docker compose run --rm harness
-```
-
-**期望日志**：
-
-```
-========================================================================
-  CodingAgent — OpenClaw + Copilot self-correcting code generator
-  Workspace: /workspace
-  Max iterations: 4
-========================================================================
-[orchestrator] Skill references in SPEC.md: ['PYTHON_STYLE.md', 'ALGO_PATTERNS.md', 'ERROR_HANDLING.md', 'TESTING.md']
-[openclaw_client] Gateway ready ✓
-
-━━━━━━ Iteration 1/4 ━━━━━━
-[openclaw_client] → agent='coder'    ...
-[coder]    reply: {"status":"done","file":"solution.py","skills_used":[...]}
-[openclaw_client] → agent='runner'   ...
-[runner]   reply: {"status":"FAIL","exit_code":1,"log":"RUN_LOG.md"}
->>> Iteration 1 status: FAIL
-[openclaw_client] → agent='diagnoser' ...
-[diagnoser] reply: {"status":"diagnosed","exception":"AssertionError: ...","file":"DIAGNOSIS.md"}
-
-━━━━━━ Iteration 2/4 ━━━━━━
-[coder]    reply: {"status":"done", ...}
-[runner]   reply: {"status":"PASS","exit_code":0,"log":"RUN_LOG.md"}
->>> Iteration 2 status: PASS
-✅ Solution passed — pipeline complete.
-```
-
-**退出码**：harness 进程 `0 = PASS`，`1 = 用尽 MAX_ITERATIONS 仍 FAIL`，`2 = SPEC.md 缺失`。
-
-**产物**（在宿主机的 `workspace/code/` 下，能直接 cat / 编辑器打开）：
-
-| 文件 | 来源 | 含义 |
-|------|------|------|
-| `solution.py`    | Coder    | 最终代码 |
-| `RUN_LOG.md`     | Runner   | `## Result` `## Stdout` `## Stderr / Traceback` |
-| `DIAGNOSIS.md`   | Diagnoser | 仅在中途失败过才有；最后一轮通过则会被清掉 |
-
-**调参**：
-
-```bash
-# 临时改最大迭代次数（也可写进 .env 的 MAX_ITERATIONS）
-MAX_ITERATIONS=6 docker compose up --abort-on-container-exit harness
-
-# 单独看 OpenClaw gateway 日志
-docker logs -f codingagent-openclaw
-```
-
----
-
-### 入口 B · 通过 OpenCode 调用
-
-详细说明见下方 [给 OpenCode 调用（MCP 集成）](#给-opencode-调用mcp-集成) 一节。最短路径：
-
-```bash
-pip install -r mcp/requirements.txt   # 安装 MCP SDK
-opencode                              # 在 CodingAgent/ 目录启动 OpenCode
-# 然后在 OpenCode 里：
-#   /agent codingagent
-#   写一个 LRU 缓存，遵守 @PYTHON_STYLE.md @ALGO_PATTERNS.md
-```
-
-OpenCode 会自动识别 [opencode.json](opencode.json)，启动 [mcp/mcp_server.py](mcp/mcp_server.py) 这个 stdio MCP server；server 在宿主机上 `docker compose up harness` 跑一遍流水线，把结果回传给 OpenCode。
-
----
-
-### 步骤 4 · 复跑 / 换题
-
-```bash
-# 改 SPEC.md，清产物，再跑一次
-$EDITOR workspace/code/SPEC.md
-rm -f workspace/code/solution.py workspace/code/RUN_LOG.md workspace/code/DIAGNOSIS.md
-docker compose up --abort-on-container-exit harness
-```
-
-> 不想清产物？orchestrator 在每轮开头会自动删掉 `solution.py` 和 `RUN_LOG.md`；`DIAGNOSIS.md` 只有在第 1 轮迭代时被清，后续保留作为反馈。手动清理只是为了避免读到上一次任务的旧产物。
-
----
-
-## 关键设计点
-
-### 模型走 Copilot 内置 Provider
-
-`config/openclaw.json`：
+`config/openclaw.json` 使用 OpenClaw 内置的 [GitHub Copilot Provider](https://docs.openclaw.ai/providers/github-copilot)：
 
 ```json
-"agents": {
-  "defaults": {
-    "model": {
-      "primary": "github-copilot/claude-opus-4.7",
-      "fallbacks": ["github-copilot/claude-sonnet-4.5"]
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "github-copilot/gpt-5.6-sol",
+        "fallbacks": ["github-copilot/gpt-5.5"]
+      }
     }
   }
 }
 ```
 
-鉴权来自 `COPILOT_GITHUB_TOKEN`（同步到 `GH_TOKEN`，匹配插件的多源探测顺序）。
+GPT 模型使用 OpenClaw 的 OpenAI Responses Transport。OpenClaw 会根据当前 Copilot 账户实时发现可用模型。
 
-### 工具白名单 — 精确到目录
+## 凭据处理
 
-```json
-"tools": {
-  "exec":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace/code"] },
-  "read":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "write": { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] }
-}
+`config/openclaw.json` 现在只是无凭据模板。启动时：
+
+1. `secrets-init` 将模板复制到私有 `config-vol`。
+2. 在 tmpfs 类型的 `secrets-vol` 中生成或复用 Gateway Token。
+3. 将 Gateway Token 注入运行时配置。
+4. 为 Coder、Runner 和 Diagnoser 创建仅存在于运行时 Volume 的 Copilot Auth Profile。
+5. Gateway 启动前执行 `openclaw doctor --fix`，将 Auth Profile 迁移到 OpenClaw 2.0 的 SQLite Secret Store。
+6. `pytest-init` 从 Microsoft 包代理安装固定版本 `pytest==8.3.5`，并以只读工具 Volume 提供给 Runner。
+
+如需使用 OpenClaw 官方 Device Flow：
+
+```bash
+./sandbox.sh shell
+docker exec -it codingagent-openclaw \
+  node /app/openclaw.mjs models auth login-github-copilot
 ```
 
-每个 Agent 还在 `agents.list[].tools.deny` 上做二级裁剪，确保 Coder/Diagnoser 拿不到 `exec`，Runner 拿不到 `edit`。
+日常自动运行由 `sandbox.sh` 提供 `COPILOT_GITHUB_TOKEN`。
 
-### 启动期 Token 轮换
+## Docker Sandbox 隔离
 
-`security/secrets-init.sh` 在所有服务之前先跑一次，生成新的 Gateway Token，写入 tmpfs 卷 `/run/secrets/gateway-token`，并通过 `jq` 注入 `config/openclaw.json` 的 `gateway.auth.token` 与 `gateway.remote.token`。
+Docker Sandboxes 为项目提供：
 
-### Workspace = 单一可信源
+- 独立 microVM 隔离边界；
+- 私有 Docker daemon 和镜像存储；
+- 隔离的文件系统与网络；
+- 显式的 Workspace 共享和端口转发；
+- Sandbox 级出站网络策略。
 
-宿主机 `./workspace/` 同时挂到：
+项目目录在 microVM 内保持相同的绝对路径，因此 `workspace/` 下的改动会同步显示在宿主机；容器、镜像和 Docker Volume 则只存在于 Sandbox 内部。
 
-- OpenClaw 容器：`/home/node/.openclaw/workspace`（Agents 读写）
-- Harness 容器：`/workspace`（编排器读写）
+官方文档：[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)。
 
-所以 `orchestrator.py` 在 Agent 写完文件后能立即在宿主机视图下校验产物。
+## OpenCode MCP 集成
 
----
+现有 `opencode.json` 与 `mcp/mcp_server.py` 可将流水线暴露给 OpenCode。先部署 Sandbox，再从当前目录启动 OpenCode。命令行验证仍建议使用：
+
+```bash
+./sandbox.sh run
+```
 
 ## 排错
 
-| 现象 | 排查 |
-|------|------|
-| `harness` 卡在 `Waiting for gateway` | `docker logs codingagent-openclaw`；多半是 `COPILOT_GITHUB_TOKEN` 没填或失效 |
-| `Copilot token exchange failed: HTTP 403` / `model fallback decision: candidate_failed reason=auth` | `gh auth token` 直出的 PAT 通常没有 Copilot OAuth scope，gateway 实时换 token 会被 GitHub 拒绝。本项目的 [`security/secrets-init.sh`](security/secrets-init.sh) 已经按 [docs.openclaw.ai → Non-interactive onboarding](https://docs.openclaw.ai/providers/github-copilot#copilot-proxy-plugin-copilot-proxy) 把 token 直接写入 `config/agents/<id>/agent/auth-profiles.json` 让 gateway 读 stored profile（不再做 exchange）。如果仍 403，说明这枚 token 本身没有 Copilot 订阅；改用 device flow：<br/><br/>**device-flow 一次性引导**（见下文 [Copilot 凭据修复](#copilot-凭据修复)）：`docker compose down -v && docker compose up -d openclaw && docker exec -it codingagent-openclaw node /app/openclaw.mjs models auth login-github-copilot` |
-| Coder 引用了不存在的 Skill | orchestrator 在启动日志里打印 `Skill references in SPEC.md`；不存在的 `@FILE.md` 会被静默丢弃 |
-| Runner 报 `pytest not found` | 系统提示已包含 `pip install --quiet pytest` 兜底；若仍失败，确认 `tools.exec.enabled=true` |
-| Diagnoser 不写 DIAGNOSIS.md | orchestrator 会打印 `⚠️ Diagnoser did not write DIAGNOSIS.md`；下一轮 Coder 会盲打。可以提高 `MAX_ITERATIONS` |
-| 模型不存在 | `docker compose exec codingagent-openclaw openclaw models auth login --provider github-copilot --method device`，或把 primary 改成 `github-copilot/claude-sonnet-4.5` |
+| 现象 | 处理方式 |
+|------|----------|
+| `sbx` 无法启动 | 确认 Apple silicon、macOS 14+、已执行 `sbx login` 且内存充足 |
+| Gateway 健康检查失败 | 执行 `./sandbox.sh logs` 查看 OpenClaw 启动日志 |
+| Copilot 鉴权失败 | 检查 `gh auth status`，并确认账户具有 Copilot 权限 |
+| 模型不存在 | 检查实时模型目录，并确认组织策略允许 GPT-5.6 Sol |
+| Harness 无法访问 Docker | 重建 Sandbox，确认挂载的是 microVM 内部 Socket |
+| `18790` 端口被占用 | 停止冲突进程，或修改 `sandbox.sh` 中的端口转发 |
 
----
-
-## Copilot 凭据修复
-
-如果 gateway 持续报 `Copilot token exchange failed: HTTP 403`，说明 `.env` 里的 `COPILOT_GITHUB_TOKEN` 没有 Copilot OAuth scope（`gh auth token` 默认就是这种）。两条修复路径任选一条：
-
-### 选项 A · 复用同仓库 OpenClaw_AgentHarness 已登录的凭据
-
-如果你之前在 [`../OpenClaw_AgentHarness`](../OpenClaw_AgentHarness/README.md) 跑通过 device-flow，那里的凭据可以直接借用：
+查看实时模型目录：
 
 ```bash
-cd /Users/lokinfey/Downloads/Samples
-
-# 1) 拷已交换的 Copilot API token cache
-mkdir -p CodingAgent/config/credentials
-cp OpenClaw_AgentHarness/config/credentials/github-copilot.token.json \
-   CodingAgent/config/credentials/
-
-# 2) 拷 auth-profile 给三个 agent
-for AGENT in coder runner diagnoser; do
-  mkdir -p CodingAgent/config/agents/$AGENT/agent
-  cp OpenClaw_AgentHarness/config/agents/coder/agent/auth-profiles.json \
-     CodingAgent/config/agents/$AGENT/agent/
-  cp OpenClaw_AgentHarness/config/agents/coder/agent/auth-state.json \
-     CodingAgent/config/agents/$AGENT/agent/ 2>/dev/null || true
-done
-
-# 3) 同步 .env，避免下次启动被 secrets-init 用旧 token 覆盖
-WORKING_TOKEN=$(python3 -c "import json; print(json.load(open('OpenClaw_AgentHarness/config/agents/coder/agent/auth-profiles.json'))['profiles']['github-copilot:github']['token'])")
-sed -i.bak "s|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=$WORKING_TOKEN|" CodingAgent/.env
-
-cd CodingAgent
-docker compose down -v
-docker compose up --abort-on-container-exit harness
+sbx exec codingagent-openclaw \
+  docker exec codingagent-openclaw \
+  node /app/openclaw.mjs models list
 ```
 
-### 选项 B · 在 CodingAgent 容器内做一次 device-flow 登录（推荐，自给自足）
+## 停止与清理
 
 ```bash
-cd /Users/lokinfey/Downloads/Samples/CodingAgent
-
-# 1) 干净启动，跳过 secrets-init 的 seed（让 .env 里 token 保持 ghu_replace_me）
-docker compose down -v
-sed -i.bak 's|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=ghu_replace_me|' .env
-docker compose up -d openclaw
-
-# 2) 在容器内交互式登录（必须 -it）
-docker exec -it codingagent-openclaw \
-  node /app/openclaw.mjs models auth login-github-copilot
-# → 浏览器打开提示的 URL 输入 8 位 code → 终端等到 OK
-
-# 3) 把 main 的 auth-profile 复用给三个 agent
-for AGENT in coder runner diagnoser; do
-  mkdir -p config/agents/$AGENT/agent
-  cp config/agents/main/agent/auth-profiles.json \
-     config/agents/$AGENT/agent/
-done
-
-# 4) .env 也同步成这枚新 token（让重启时 secrets-init 用一致的值）
-NEW_TOKEN=$(python3 -c "import json; print(json.load(open('config/agents/main/agent/auth-profiles.json'))['profiles']['github-copilot:github']['token'])")
-sed -i.bak "s|^COPILOT_GITHUB_TOKEN=.*|COPILOT_GITHUB_TOKEN=$NEW_TOKEN|" .env
-
-# 5) 跑流水线
-docker compose up --abort-on-container-exit harness
+./sandbox.sh down
+sbx stop codingagent-openclaw
 ```
 
-device-flow 拿到的 `ghu_...` token 自带 Copilot scope，gateway 的 `Copilot token exchange` 步骤会成功，并在 `config/credentials/github-copilot.token.json` 缓存短期 Copilot API token；缓存过期时 gateway 会用 stored `ghu_...` 重新 exchange，不需要你再操心。
-
----
-
-## 给 OpenCode 调用（MCP 集成）
-
-仓库带了一个 stdio MCP server，把整条流水线包装成 [OpenCode](https://opencode.ai) 可以直接调用的工具。
-
-### 1. 安装 MCP SDK
+删除 Sandbox 内全部镜像、容器和 Volume：
 
 ```bash
-pip install -r mcp/requirements.txt
-```
-
-### 2. 注册到 OpenCode
-
-仓库根目录的 [opencode.json](opencode.json) 已经写好了 server + 一个 `codingagent` 模式 agent：
-
-```jsonc
-{
-  "mcp": {
-    "codingagent": {
-      "type": "local",
-      "command": ["python", "${workspaceFolder}/mcp/mcp_server.py"],
-      "environment": { "CODINGAGENT_ROOT": "${workspaceFolder}" }
-    }
-  },
-  "agent": {
-    "codingagent": { "tools": { "codingagent*": true }, ... }
-  }
-}
-```
-
-把这个文件留在 `CodingAgent/` 下，从该目录启动 OpenCode 即可被自动识别；或者把 `mcp` 段拷进 `~/.config/opencode/config.json` 做成全局工具。
-
-### 3. 暴露的工具
-
-| 工具 | 作用 |
-|------|------|
-| `codingagent_list_skills`        | 列出 `workspace/skills/` 下所有可用 Skill |
-| `codingagent_read_skill(name)`   | 读取某个 Skill 的全文（OpenCode 用户可用作上下文参考） |
-| `codingagent_add_skill(name, content)` | 写入新的 Skill 文件，未来 SPEC 用 `@<name>.md` 引用 |
-| `codingagent_generate(spec, max_iterations?, timeout_seconds?)` | 把 SPEC 写入 `workspace/code/SPEC.md`，跑一遍 docker compose 流水线，返回最终 `solution.py` / `RUN_LOG.md` / `DIAGNOSIS.md` |
-
-### 4. 在 OpenCode 里这样用
-
-```text
-> /agent codingagent
-> 写一个 LRU 缓存类，键类型是 str，按 spec 提供的容量驱逐。要求遵守
-> @PYTHON_STYLE.md @ALGO_PATTERNS.md @ERROR_HANDLING.md。
-```
-
-Agent 系统提示会让它先调 `codingagent_list_skills` 确认可用技能，再把用户需求改写成带 `## Required Skills` 段的 SPEC，最后调用 `codingagent_generate` 跑完整闭环。失败时返回 `DIAGNOSIS.md` 的 Patch Plan，OpenCode 用户可以再补一轮反馈。
-
-### 注意
-
-- MCP server 在**宿主机**上运行，通过 `docker compose -f docker-compose.yml up harness` 驱动流水线，所以 Docker daemon 要可用。
-- 第一次调用前最好先跑过一次 `./setup.sh`，确保 `harness` 镜像、token 卷、`.env` 都已就绪。
-- 若同时跑多个 `codingagent_generate` 调用，会争用同一个 workspace；建议串行调用（OpenCode 默认就是串行的工具调用）。
-
----
-
-## 关闭
-
-```bash
-docker compose down -v   # -v 同时清掉 secrets 卷里的旧 token
+sbx rm codingagent-openclaw
 ```

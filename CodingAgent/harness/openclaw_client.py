@@ -1,9 +1,8 @@
 """
-openclaw_client.py — Drive OpenClaw agents via `docker exec` (Option A).
+Drive OpenClaw 2.0 agents through the CLI in the gateway container.
 
-The OpenClaw 2026.5.x gateway speaks WebSocket only — there is no
-OpenAI-compatible REST endpoint. So we shell into the running openclaw
-container and invoke its built-in CLI:
+The Docker CLI talks only to the private daemon inside the Docker Sandbox
+microVM:
 
     docker exec <container> node /app/openclaw.mjs agent \\
         --agent <id> --message <prompt> --json --timeout <s>
@@ -87,6 +86,13 @@ def _extract_reply(stdout: str) -> str:
                     for key in ("reply", "result", "response"):
                         if isinstance(obj.get(key), dict):
                             inner = obj[key]
+                            payloads = inner.get("payloads")
+                            if isinstance(payloads, list):
+                                for payload in reversed(payloads):
+                                    if isinstance(payload, dict):
+                                        value = payload.get("text")
+                                        if isinstance(value, str) and value.strip():
+                                            return value.strip()
                             for k in ("content", "text", "message"):
                                 v = inner.get(k)
                                 if isinstance(v, str) and v.strip():

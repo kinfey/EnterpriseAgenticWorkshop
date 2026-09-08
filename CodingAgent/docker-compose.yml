@@ -5,25 +5,66 @@ services:
     container_name: codingagent-secrets-init
     command: ["/bin/sh", "/secrets-init.sh"]
     environment:
-      # Used by secrets-init.sh to seed per-agent auth-profiles.json so the
-      # gateway uses a stored Copilot token (avoids HTTP 403 token exchange).
       COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN}
     volumes:
       - secrets-vol:/run/secrets
       - ./security/secrets-init.sh:/secrets-init.sh:ro
-      - ./config:/openclaw-config
+      - ./config/openclaw.json:/config-template/openclaw.json:ro
+      - config-vol:/openclaw-config
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     restart: "no"
     networks:
       - codingagent-net
 
-  # ── OpenClaw Gateway ──────────────────────────────────────────────────
-  openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: codingagent-openclaw
+  # ── OpenClaw 2.0 config/auth migration ─────────────────────────────
+  openclaw-init:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.8.1}
+    container_name: codingagent-openclaw-init
     depends_on:
       secrets-init:
+        condition: service_completed_successfully
+    command: ["node", "/app/openclaw.mjs", "doctor", "--fix"]
+    environment:
+      COPILOT_GITHUB_TOKEN: ${COPILOT_GITHUB_TOKEN}
+      GH_TOKEN: ${COPILOT_GITHUB_TOKEN}
+      HOME: /home/node
+    volumes:
+      - config-vol:/home/node/.openclaw:rw
+    restart: "no"
+    networks:
+      - codingagent-net
+
+  # ── Reproducible Python test runtime ────────────────────────────────
+  pytest-init:
+    image: python:3.12-slim
+    container_name: codingagent-pytest-init
+    command:
+      - python
+      - -m
+      - pip
+      - install
+      - --disable-pip-version-check
+      - --no-cache-dir
+      - --index-url
+      - https://packagefeedproxy.microsoft.io/pypi/simple
+      - --target
+      - /opt/pytest
+      - pytest==8.3.5
+    volumes:
+      - pytest-vol:/opt/pytest
+    restart: "no"
+    networks:
+      - codingagent-net
+
+  # ── OpenClaw Gateway ──────────────────────────────────────────────────
+  openclaw:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.8.1}
+    container_name: codingagent-openclaw
+    depends_on:
+      openclaw-init:
+        condition: service_completed_successfully
+      pytest-init:
         condition: service_completed_successfully
     ports:
       - "18790:18789"
@@ -33,9 +74,10 @@ services:
       GH_TOKEN: ${COPILOT_GITHUB_TOKEN}
       HOME: /home/node
     volumes:
-      - ./config:/home/node/.openclaw:rw
+      - config-vol:/home/node/.openclaw:rw
       - ./workspace:/home/node/.openclaw/workspace:rw
       - secrets-vol:/run/secrets:ro
+      - pytest-vol:/opt/pytest:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:18789/health > /dev/null || exit 1"]
       interval: 5s
@@ -72,6 +114,7 @@ services:
       - ./harness:/app:ro
       - ./workspace:/workspace:rw
       - secrets-vol:/run/secrets:ro
+      # This is the Docker Sandbox microVM daemon socket, never the host socket.
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     command: ["python", "-u", "orchestrator.py"]
@@ -80,6 +123,8 @@ services:
       - codingagent-net
 
 volumes:
+  config-vol:
+  pytest-vol:
   secrets-vol:
     driver: local
     driver_opts:

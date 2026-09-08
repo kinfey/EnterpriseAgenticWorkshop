@@ -67,9 +67,32 @@ After saving solution.py, reply with EXACTLY one JSON line:
 RUNNER_PROMPT = """\
 ITERATION {iteration} of {max_iterations}.
 
-Execute the Coder's implementation and capture the FULL Python traceback if it
-fails. Follow your system instructions exactly. The workspace is at
-/home/node/.openclaw/workspace/code.
+Work only in /home/node/.openclaw/workspace/code.
+
+1. Read SPEC.md and solution.py.
+2. Create smoke_test.py from the spec. If the spec contains a Smoke Test
+   section, translate that block exactly. Do not add APIs, exception types, or
+   behavioral expectations that the spec does not define.
+3. If test_solution.py exists, run:
+     PYTHONPATH=/opt/pytest python3 -m pytest -v --tb=long --no-header test_solution.py
+   Otherwise run:
+     python3 smoke_test.py
+4. Capture complete stdout and stderr without truncation.
+5. Write RUN_LOG.md with exactly these headings:
+     ## Result
+     PASS or FAIL
+     ## Command
+     <command>
+     ## Exit Code
+     <integer>
+     ## Stdout
+     <verbatim stdout in a fenced block>
+     ## Stderr / Traceback
+     <verbatim stderr in a fenced block>
+6. Remove any temporary stdout, stderr, or exit-code capture files you created.
+   Only the documented pipeline artifacts may remain in the code directory.
+
+Do not modify solution.py.
 
 After writing RUN_LOG.md, reply with EXACTLY one JSON line:
 {{"status":"PASS"|"FAIL","exit_code":N,"log":"RUN_LOG.md"}}
@@ -78,11 +101,19 @@ After writing RUN_LOG.md, reply with EXACTLY one JSON line:
 DIAGNOSER_PROMPT = """\
 ITERATION {iteration} of {max_iterations}.
 
-The Runner reported FAIL. Read /home/node/.openclaw/workspace/code/RUN_LOG.md
-(it contains a verbatim Python traceback under '## Stderr / Traceback'),
-then read solution.py and SPEC.md, and produce
-/home/node/.openclaw/workspace/code/DIAGNOSIS.md as specified in your system
-instructions. The Coder will read your Patch Plan in the next iteration.
+The Runner reported FAIL. Read RUN_LOG.md, solution.py, and SPEC.md under
+/home/node/.openclaw/workspace/code. Identify the exception, exact offending
+file and line, root cause, failure category, and the smallest safe fix.
+
+Write DIAGNOSIS.md with exactly these headings:
+  ## Failure Signature
+  ## Root Cause
+  ## Affected Lines
+  ## Patch Plan
+  ## Regression Risk
+
+Do not execute code and do not modify solution.py. The Coder will apply the
+Patch Plan in the next iteration.
 
 Reply with EXACTLY one JSON line:
 {{"status":"diagnosed","exception":"<Type: message>","file":"DIAGNOSIS.md"}}
@@ -165,7 +196,7 @@ def _reset_iteration_artifacts(keep_diagnosis: bool) -> None:
     DIAGNOSIS.md is preserved when keep_diagnosis=True so the Coder can read it
     as Error-Correction feedback, then deleted at the start of iteration 1.
     """
-    for name in ("solution.py", "RUN_LOG.md"):
+    for name in ("solution.py", "RUN_LOG.md", "smoke_test.py"):
         f = CODE_DIR / name
         if f.exists():
             f.unlink()
@@ -198,7 +229,7 @@ def main() -> int:
 
     wait_for_gateway()
 
-    # Wipe any cross-run agent session memory.
+    # Wipe any cross-run agent session memory inside the sandbox daemon.
     subprocess.run(
         ["docker", "exec", os.getenv("OPENCLAW_CONTAINER", "codingagent-openclaw"),
          "bash", "-lc",
