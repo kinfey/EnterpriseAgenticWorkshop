@@ -3,7 +3,7 @@
 An adversarial testing framework built with **Microsoft Agent Framework + GitHub Copilot SDK (Python)**.
 It targets an "educational video script generation Agent" (the business Agent), uses a separate "test Agent"
 to construct edge-case inputs, and uses a deterministic validator to check whether the output script still
-conforms to the prescribed template. Two models — **Claude Opus 4.7** and **GPT-5.5** — are compared side
+conforms to the prescribed template. Two models — **GPT-6 Astra** and **Grok 4.6** — are compared side
 by side on the console.
 
 ## Directory Layout
@@ -45,7 +45,7 @@ python main.py --only edge-03
 
 # Test only one model
 python main.py --model gpt
-python main.py --model claude
+python main.py --model grok
 
 # Various toggles
 python main.py --no-attack          # baseline, plain prompt
@@ -57,8 +57,8 @@ python main.py --max-turns 5        # adjust multi-turn rounds (default 3)
 If the model ID names differ, override via environment variables:
 
 ```bash
-export MODEL_CLAUDE=claude-opus-4.7
-export MODEL_GPT=gpt-5.5
+export MODEL_GPT=gpt-6-astra
+export MODEL_GROK=grok-4.6
 ```
 
 ## Test Design

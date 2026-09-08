@@ -50,8 +50,8 @@ BUSINESS_INSTRUCTIONS = f"""\
 def make_business_agent(model_id: str) -> GitHubCopilotAgent:
     """Construct a fresh business agent bound to the given model."""
     return GitHubCopilotAgent(
+        instructions=BUSINESS_INSTRUCTIONS,
         default_options={
-            "instructions": BUSINESS_INSTRUCTIONS,
             "model": model_id,
             "timeout": REQUEST_TIMEOUT,
         },

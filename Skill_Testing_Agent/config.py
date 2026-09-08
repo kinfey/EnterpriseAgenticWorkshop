@@ -1,8 +1,8 @@
 """Model configuration for the testing harness.
 
-Two backends are exercised through the GitHub Copilot CLI: Claude Opus 4.7
-and GPT-5.5. The exact model IDs accepted by `copilot --model` change over
-time; override with env vars `MODEL_CLAUDE` / `MODEL_GPT` if needed.
+Two backends are exercised through the GitHub Copilot CLI: GPT-6 Astra and
+Grok 4.6. The exact model IDs accepted by `copilot --model` change over time;
+override with env vars `MODEL_GPT` / `MODEL_GROK` if needed.
 """
 from __future__ import annotations
 
@@ -18,12 +18,12 @@ class ModelSpec:
 
 MODELS: list[ModelSpec] = [
     ModelSpec(
-        label="Claude Opus 4.7",
-        model_id=os.getenv("MODEL_CLAUDE", "claude-opus-4.7"),
+        label="GPT-6 Astra",
+        model_id=os.getenv("MODEL_GPT", "gpt-6-astra"),
     ),
     ModelSpec(
-        label="GPT-5.5",
-        model_id=os.getenv("MODEL_GPT", "gpt-5.5"),
+        label="Grok 4.6",
+        model_id=os.getenv("MODEL_GROK", "grok-4.6"),
     ),
 ]
 

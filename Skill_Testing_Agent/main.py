@@ -11,6 +11,7 @@ Usage:
     python main.py                        # multi-turn ON, judge ON (default)
     python main.py --only edge-03
     python main.py --model gpt
+    python main.py --model grok
     python main.py --no-attack            # plain prompt baseline
     python main.py --single-turn          # disable multi-turn (one shot)
     python main.py --no-judge             # skip LLM rubric grading
@@ -285,7 +286,7 @@ def render_summary(records: list[dict], use_judge: bool) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Skill Testing Agent")
     p.add_argument("--only", help="run a single case id, e.g. edge-03")
-    p.add_argument("--model", choices=["claude", "gpt", "all"], default="all")
+    p.add_argument("--model", choices=["gpt", "grok", "all"], default="all")
     p.add_argument("--no-attack", dest="use_attack", action="store_false",
                    help="skip the adversarial test agent (baseline)")
     p.add_argument("--single-turn", action="store_true",
@@ -299,10 +300,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def select_models(choice: str) -> list[ModelSpec]:
-    if choice == "claude":
-        return [m for m in MODELS if "Claude" in m.label]
     if choice == "gpt":
         return [m for m in MODELS if "GPT" in m.label]
+    if choice == "grok":
+        return [m for m in MODELS if "Grok" in m.label]
     return list(MODELS)
 
 

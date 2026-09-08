@@ -117,8 +117,8 @@ def _extract_json(text: str) -> dict | None:
 
 def make_judge_agent(model_id: str) -> GitHubCopilotAgent:
     return GitHubCopilotAgent(
+        instructions=JUDGE_INSTRUCTIONS,
         default_options={
-            "instructions": JUDGE_INSTRUCTIONS,
             "model": model_id,
             "timeout": REQUEST_TIMEOUT,
         },

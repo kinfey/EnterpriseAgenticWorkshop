@@ -3,7 +3,7 @@
 一个用 **Microsoft Agent Framework + GitHub Copilot SDK (Python)** 搭的对抗式测试框架。  
 它针对一个"教育视频脚本生成 Agent"（业务 Agent），使用一个独立的"测试 Agent"
 构造边界场景输入，并用确定性校验器检查输出脚本是否仍然符合既定模板。
-两个模型 —— **Claude Opus 4.7** 与 **GPT-5.5** —— 在控制台并行对比。
+两个模型 —— **GPT-6 Astra** 与 **Grok 4.6** —— 在控制台并行对比。
 
 ## 目录结构
 
@@ -44,7 +44,7 @@ python main.py --only edge-03
 
 # 只测一个模型
 python main.py --model gpt
-python main.py --model claude
+python main.py --model grok
 
 # 各种关闭开关
 python main.py --no-attack          # baseline，普通 prompt
@@ -56,8 +56,8 @@ python main.py --max-turns 5        # 调整 multi-turn 轮数（默认 3）
 如果模型 ID 名称不一致，可通过环境变量覆盖：
 
 ```bash
-export MODEL_CLAUDE=claude-opus-4.7
-export MODEL_GPT=gpt-5.5
+export MODEL_GPT=gpt-6-astra
+export MODEL_GROK=grok-4.6
 ```
 
 ## 测试设计

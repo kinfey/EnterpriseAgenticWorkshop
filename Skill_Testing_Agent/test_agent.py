@@ -175,8 +175,8 @@ def _clean_prompt(text: str) -> str:
 
 def make_test_agent(model_id: str) -> GitHubCopilotAgent:
     return GitHubCopilotAgent(
+        instructions=ATTACK_INSTRUCTIONS,
         default_options={
-            "instructions": ATTACK_INSTRUCTIONS,
             "model": model_id,
             "timeout": REQUEST_TIMEOUT,
         },
