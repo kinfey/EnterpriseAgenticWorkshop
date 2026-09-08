@@ -2,13 +2,13 @@
 
 > **Agent A 写代码 → Agent B 写测试 → Agent C 在 OpenClaw 沙箱中执行并反馈**
 >
-> 全部基于 [OpenClaw](https://docs.openclaw.ai/) Docker Gateway 与多 Agent Workspace，模型走 GitHub Copilot 内置 Provider 的 **Claude Opus 4.7**。
+> 全部运行在 [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) microVM 中，使用 **OpenClaw v2026.9.2** Docker Gateway，并通过 GitHub Copilot 统一调用 **GPT-5.6 Sol**。
 
 ---
 
 ## 它是什么
 
-一个用 Docker Compose 启动的小型多 Agent 流水线。三个互不越权的 Agent 通过共享的 [OpenClaw Workspace](https://docs.openclaw.ai/concepts/agent-workspace) 协作完成一项「自我闭环」的代码 → 测试 → 运行 → 反馈循环：
+一个在 Docker Sandbox 隔离 microVM 内用 Docker Compose 启动的小型多 Agent 流水线。三个互不越权的 Agent 通过共享的 [OpenClaw Workspace](https://docs.openclaw.ai/concepts/agent-workspace) 协作完成一项「自我闭环」的代码 → 测试 → 运行 → 反馈循环：
 
 | Agent | 角色 | 工具集 (allowlist) |
 |-------|------|-------------------|
@@ -21,6 +21,7 @@
 参考的官方文档：
 
 - 安装：<https://docs.openclaw.ai/install/docker>
+- Docker Sandboxes：<https://docs.docker.com/ai/sandboxes/>
 - 多 Agent 沙箱工具：<https://docs.openclaw.ai/tools/multi-agent-sandbox-tools>
 - Workspace 概念：<https://docs.openclaw.ai/concepts/agent-workspace>
 - GitHub Copilot Provider：<https://docs.openclaw.ai/providers/github-copilot>
@@ -33,14 +34,18 @@
 
 ```
 OpenClaw_AgentHarness/
-├── README.md                ← 本文件
-├── docker-compose.yml       ← secrets-init + openclaw + harness 三容器
+├── README.md                ← 英文说明
+├── README.zh.md             ← 本文件
+├── docker-compose.yml       ← 初始化服务 + OpenClaw Gateway + Harness
+├── sandbox.sh               ← Docker Sandbox 部署与运维入口
 ├── .env.example             ← 把它复制成 .env 后填入 COPILOT_GITHUB_TOKEN
 ├── setup.sh                 ← 一键引导
+├── docs/
+│   └── architecture.excalidraw ← 可编辑项目架构图
 ├── config/
-│   └── openclaw.json        ← 三个 Agent + GitHub Copilot Provider + 工具白名单
+│   └── openclaw.json        ← 只读配置模板：Agent + Copilot Provider + 工具白名单
 ├── security/
-│   └── secrets-init.sh      ← 每次启动轮换 Gateway Token
+│   └── secrets-init.sh      ← 准备运行时配置与 Gateway Token
 ├── workspace/               ← OpenClaw Agent Workspace（容器里挂在 /home/node/.openclaw/workspace）
 │   ├── AGENTS.md
 │   ├── IDENTITY.md
@@ -55,20 +60,89 @@ OpenClaw_AgentHarness/
 
 ---
 
+## 项目架构
+
+系统将宿主机控制面与 Agent 运行时分离。宿主机只运行 `sbx`；Docker Compose 和 Docker Socket 均位于 Docker Sandbox microVM 内部。
+
+```mermaid
+flowchart TB
+    User["开发者 / 浏览器"] -->|"sandbox.sh"| Docker
+    User -->|"127.0.0.1:18789"| Gateway
+
+    subgraph SBX["Docker Sandbox microVM"]
+        Docker["隔离 Docker daemon"]
+        Secrets["secrets-init"]
+        Pytest["pytest-init"]
+        Gateway["OpenClaw Gateway<br/>v2026.9.2"]
+        Harness["Harness 编排器"]
+        ConfigVol[("config-vol")]
+        SecretVol[("secrets-vol tmpfs")]
+        PytestVol[("pytest-vol")]
+        Workspace[("宿主机 Workspace 挂载")]
+
+        Docker --> Secrets
+        Docker --> Pytest
+        Docker --> Gateway
+        Docker --> Harness
+        Secrets --> ConfigVol
+        Secrets --> SecretVol
+        Pytest --> PytestVol
+        ConfigVol --> Gateway
+        SecretVol --> Gateway
+        SecretVol --> Harness
+        PytestVol --> Gateway
+        Harness -->|"docker exec + OpenClaw CLI"| Gateway
+        Gateway --> Coder["Agent A：Coder"]
+        Gateway --> Tester["Agent B：Tester"]
+        Gateway --> Runner["Agent C：Runner"]
+        Coder --> Workspace
+        Tester --> Workspace
+        Runner --> Workspace
+        Runner --> PytestVol
+        Harness --> Workspace
+    end
+
+    Gateway -->|"GitHub Copilot API"| Models["GPT-5.6 Sol<br/>备用：GPT-5.5"]
+```
+
+可编辑源文件：[docs/architecture.excalidraw](docs/architecture.excalidraw)。
+
+### 组件职责
+
+| 层级 | 组件 | 职责 |
+|------|------|------|
+| 宿主机控制面 | `sandbox.sh` | 创建 microVM、配置最小网络策略、转发 `18789` 端口并执行生命周期命令。 |
+| 隔离边界 | Docker Sandbox | 提供独立 microVM、Docker daemon、文件系统和网络策略。 |
+| 初始化 | `secrets-init` | 把 OpenClaw 配置模板复制到 `config-vol`，并原子注入运行时 Gateway Token。 |
+| 初始化 | `pytest-init` | 从微软 PyPI 代理安装固定版本 `pytest==8.3.5` 到 `pytest-vol`。 |
+| Agent 运行时 | OpenClaw Gateway | 承载三个 Agent、执行工具权限控制，并调用 GitHub Copilot GPT 模型。 |
+| 编排 | Harness | 执行 Coder → Tester → Runner，检查产物、解析 `RUN_REPORT.md` 并在失败时重试。 |
+| 共享数据 | `workspace/` | 保存任务规范、生成的实现、测试和运行报告。 |
+
+### 信任与持久化边界
+
+- macOS 宿主机只向 microVM 暴露项目 Workspace 和转发端口 `18789`。
+- `/var/run/docker.sock` 属于 microVM 内部 Docker daemon，Harness 无法控制宿主机容器。
+- `config/openclaw.json` 是无凭据模板；真实 Token 只存在于运行时卷。
+- `secrets-vol` 基于 tmpfs；`config-vol` 和 `pytest-vol` 在 Compose 卷存在期间持久化。
+- 只有 Runner 可以执行命令；Coder 和 Tester 仅能操作 Workspace 文件。
+
+---
+
 ## 一次完整流程
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  iteration N                                                        │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:coder)   │
+│  orchestrator → docker exec → OpenClaw CLI --agent coder            │
 │      ↳ Agent A 读 SPEC.md (+ 上轮 RUN_REPORT.md) → 写 solution.py   │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:tester)  │
+│  orchestrator → docker exec → OpenClaw CLI --agent tester           │
 │      ↳ Agent B 读 SPEC.md + solution.py → 写 test_solution.py       │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:runner)  │
-│      ↳ Agent C 在 sandbox 内 exec  pytest -v                        │
+│  orchestrator → docker exec → OpenClaw CLI --agent runner           │
+│      ↳ Agent C 使用只读 /opt/pytest 工具卷执行 pytest               │
 │        → 写 RUN_REPORT.md (PASS / FAIL + Suggested Fixes)           │
 │                                                                     │
 │  orchestrator 解析报告:                                              │
@@ -79,36 +153,68 @@ OpenClaw_AgentHarness/
 
 ---
 
-## 快速开始
+## 版本
 
-### 1. 准备 GitHub Copilot Token
+| 组件 | 版本 / 模型 |
+|------|-------------|
+| OpenClaw | `v2026.9.2` |
+| Docker Sandboxes | `v0.42.1` 或更高版本 |
+| GitHub Copilot 主模型 | `github-copilot/gpt-5.6-sol` |
+| 备用模型 | `github-copilot/gpt-5.5` |
 
-OpenClaw 的 [github-copilot Provider](https://docs.openclaw.ai/providers/github-copilot) 默认模型即为 `github-copilot/claude-opus-4.7`。准备一份具备 Copilot 订阅的 GitHub Token：
+OpenClaw 使用日期版本号，而不是 SemVer。官方不存在 `2.0` 镜像标签；本项目将当前稳定版 `v2026.9.2` 作为本次 2.0 升级目标，并固定镜像版本，避免 `latest` 自动引入未经验证的变更。
+
+## 使用 Docker Sandbox 快速开始
+
+### 1. 安装或升级 Docker Sandboxes
+
+macOS 需要 Apple silicon 与 macOS 14 或更高版本。
+
+```bash
+brew trust docker/tap
+brew install docker/tap/sbx
+# 已安装时：
+brew upgrade docker/tap/sbx
+sbx login
+```
+
+Docker Sandbox 不依赖宿主机 Docker Desktop。每个 Sandbox 都有独立的 Docker daemon、文件系统和网络。
+
+### 2. 准备 GitHub Copilot Token
+
+OpenClaw 的 [github-copilot Provider](https://docs.openclaw.ai/providers/github-copilot) 统一使用 `github-copilot/gpt-5.6-sol`。准备一份具备 Copilot 订阅的 GitHub Token：
 
 ```bash
 # 已安装 gh CLI 且已登录的最简方式：
 gh auth token
 ```
 
-### 2. 配置 .env
+部署脚本优先读取环境变量，也可直接调用 `gh auth token`，且不会打印 Token：
 
 ```bash
 cd OpenClaw_AgentHarness
-cp .env.example .env
-# 编辑 .env，填入：
-#   COPILOT_GITHUB_TOKEN=<上一步拿到的 token>
+export COPILOT_GITHUB_TOKEN="$(gh auth token)"
 ```
 
-### 3. 一键引导
+GitHub 账户和组织策略必须允许使用 GPT-5.6 Sol。
+
+### 3. 本地部署
 
 ```bash
-chmod +x setup.sh && ./setup.sh
+chmod +x setup.sh sandbox.sh security/secrets-init.sh
+./sandbox.sh deploy
+```
+
+该命令会创建名为 `openclaw-agent-harness` 的 microVM，分配 4 CPU 与 8 GiB 内存，发布 `18789` 端口，为微软 Python 包代理添加最小出站白名单，构建 Harness 镜像并启动 OpenClaw Gateway。Control UI 地址：
+
+```bash
+http://127.0.0.1:18789/
 ```
 
 ### 4. 跑一轮流水线
 
 ```bash
-docker compose up --abort-on-container-exit harness
+./sandbox.sh run
 ```
 
 期望日志：
@@ -133,13 +239,25 @@ docker compose up --abort-on-container-exit harness
 
 ### 5. 换一个题目
 
-修改 [workspace/code/SPEC.md](workspace/code/SPEC.md)，删除 `solution.py / test_solution.py / RUN_REPORT.md`，再次执行第 4 步即可。
+修改 [workspace/code/SPEC.md](workspace/code/SPEC.md)，删除 `solution.py / test_solution.py / RUN_REPORT.md`，再次执行 `./sandbox.sh run`。
+
+### 常用操作
+
+| 命令 | 用途 |
+|------|------|
+| `./sandbox.sh status` | 查看 microVM 与 Compose 服务 |
+| `./sandbox.sh dashboard` | 复制 Gateway Token 并打开已认证的 Control UI |
+| `./sandbox.sh logs` | 跟踪 OpenClaw Gateway 日志 |
+| `./sandbox.sh shell` | 进入 microVM |
+| `./sandbox.sh down` | 停止 Compose 服务但保留 microVM |
+| `sbx stop openclaw-agent-harness` | 停止 microVM |
+| `sbx rm openclaw-agent-harness` | 删除 microVM 及其内部镜像 |
 
 ---
 
 ## 关键设计要点
 
-### 模型 — Claude Opus 4.7
+### 模型 — GitHub Copilot GPT-5.6 Sol
 
 `config/openclaw.json` 中：
 
@@ -147,33 +265,36 @@ docker compose up --abort-on-container-exit harness
 "agents": {
   "defaults": {
     "model": {
-      "primary": "github-copilot/claude-opus-4.7",
-      "fallbacks": ["github-copilot/claude-sonnet-4.5"]
+      "primary": "github-copilot/gpt-5.6-sol",
+      "fallbacks": ["github-copilot/gpt-5.5"]
     }
   }
 }
 ```
 
-Provider 级配置走 OpenClaw 的内置 `github-copilot` 插件，鉴权来自环境变量 `COPILOT_GITHUB_TOKEN`（同时同步到 `GH_TOKEN`，匹配插件的多源探测顺序）。
+Provider 级配置走 OpenClaw 的内置 `github-copilot` 插件，鉴权来自环境变量 `COPILOT_GITHUB_TOKEN`（同时同步到 `GH_TOKEN`，匹配插件的多源探测顺序）。三个 Agent 的主模型和备用模型都只使用 GPT 系列。
 
-### 工具白名单 — 精确到目录
+### Agent 工具隔离
 
 ```json
-"tools": {
-  "exec":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace/code"] },
-  "read":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "write": { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "browser":   { "enabled": false },
-  "web_search":{ "enabled": false },
-  "web_fetch": { "enabled": false }
+"agents": {
+  "entries": {
+    "coder":  { "tools": { "deny": ["exec", "process", "browser"] } },
+    "tester": { "tools": { "deny": ["exec", "process", "browser"] } },
+    "runner": { "tools": { "deny": ["process", "browser", "edit"] } }
+  }
 }
 ```
 
-每个 Agent 又在 `agents.list[].tools.allow / deny` 上做了二级裁剪，确保 Coder/Tester 拿不到 `exec`，Runner 拿不到 `edit`/`apply_patch`。
+OpenClaw 2026.9.2 使用键值化的 `agents.entries`。Coder 和 Tester 无法执行进程；Runner 可以运行 pytest，但不能通过 `edit` 或 `apply_patch` 修改实现。
 
-### 启动期 Token 轮换
+### 运行时配置与 Token
 
-`security/secrets-init.sh` 容器在所有服务启动之前先跑一次，生成新的 64 位随机 Gateway Token，写入 `tmpfs` 卷 `/run/secrets/gateway-token`，并用 `jq` 把它注入到 `config/openclaw.json` 的 `gateway.auth.token` 字段。Harness 容器以只读方式挂载同一个 tmpfs 卷取 token；OpenClaw 容器以只读方式挂载，并设置 `OPENCLAW_TOKEN_FILE=/run/secrets/gateway-token`。
+`security/secrets-init.sh` 在 Gateway 之前运行，把 `config/openclaw.json` 模板复制到 `config-vol`，在 `secrets-vol` 存续期间复用 Token，并以原子方式注入运行时副本。真实凭据不会写回 Git 工作树。
+
+### Docker Sandbox 隔离
+
+Compose 栈运行在 Docker Sandbox microVM 内，而不是直接连接宿主机 Docker daemon。Harness 仍挂载 `/var/run/docker.sock` 以执行 OpenClaw CLI，但该 Socket 属于 microVM 内部的隔离 Docker daemon，无法控制宿主机容器。
 
 ### Workspace = 单一可信源
 
@@ -184,21 +305,36 @@ Provider 级配置走 OpenClaw 的内置 `github-copilot` 插件，鉴权来自�
 
 所以 `orchestrator.py` 可以在 Agent 写完文件后立即在宿主机视图下检查产物是否生成。
 
+### 可复现的 pytest 运行环境
+
+`pytest-init` 在 OpenClaw 启动前把 `pytest==8.3.5` 安装到 `pytest-vol`。Runner 执行：
+
+```bash
+PYTHONPATH=/opt/pytest python3 -m pytest test_solution.py -v --tb=short
+```
+
+因此 Agent 不需要动态安装软件包，也不能修改测试工具链。
+
 ---
 
 ## 排错
 
 | 现象 | 排查 |
 |------|------|
-| `harness` 卡在 `Waiting for gateway` | `docker logs openclaw`，确认 healthcheck 返回 200。一般是 `COPILOT_GITHUB_TOKEN` 没填或失效 |
-| `agent 'coder' HTTP 401` | Token 轮换不一致。`docker compose down -v && ./setup.sh` 重置 tmpfs 卷 |
-| Runner 报 `pytest not found` | Runner prompt 里已经做了 `pip install pytest` 的兜底；如果还是失败，确认 `tools.exec.enabled=true` 且未把 Runner 的 `exec` 在 `agents.list[]` 里 deny 掉 |
-| 模型不存在 | 确认你的 GitHub 账户 Copilot 订阅可访问 `claude-opus-4.7`。否则把 `agents.defaults.model.primary` 换成 `github-copilot/claude-sonnet-4.5` 或运行一次 `docker compose exec openclaw openclaw models auth login --provider github-copilot --method device` |
+| `harness` 卡在 `Waiting for gateway` | 执行 `./sandbox.sh logs`，确认 healthcheck 返回 200。一般是 `COPILOT_GITHUB_TOKEN` 没填或失效 |
+| Control UI 提示 `gateway token missing` | 执行 `./sandbox.sh dashboard`，自动复制运行时 Token 并打开已认证地址 |
+| `agent 'coder' HTTP 401` | Token 状态不一致。执行 `./sandbox.sh down && ./sandbox.sh deploy`，从运行时配置重新创建 Gateway |
+| Runner 报 `pytest not found` | 重新执行 `./sandbox.sh deploy`。`pytest-init` 会在 OpenClaw 启动前把固定版本 pytest 安装到只读 `/opt/pytest` 工具卷 |
+| 模型不存在 | 确认 Copilot 账户与组织策略允许 `gpt-5.6-sol`；可执行 `sbx exec openclaw-agent-harness docker exec openclaw node /app/openclaw.mjs models list` 查看实时模型目录 |
+| `sbx` 无法启动 | 确认 Apple silicon、macOS 14+、已执行 `sbx login`，并至少有 8 GiB 可用内存 |
 
 ---
 
 ## 关闭
 
 ```bash
-docker compose down -v   # -v 同时清掉 secrets 卷里的旧 token
+./sandbox.sh down
+sbx stop openclaw-agent-harness
 ```
+
+如需彻底删除所有 Sandbox 状态，执行 `sbx rm openclaw-agent-harness`。

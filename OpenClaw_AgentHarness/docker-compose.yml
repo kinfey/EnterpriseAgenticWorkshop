@@ -7,19 +7,44 @@ services:
     volumes:
       - secrets-vol:/run/secrets
       - ./security/secrets-init.sh:/secrets-init.sh:ro
-      - ./config:/openclaw-config
+      - ./config/openclaw.json:/config-template/openclaw.json:ro
+      - config-vol:/openclaw-config
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=16m
     restart: "no"
     networks:
       - harness-net
 
+  # ── Python test tooling shared read-only with the OpenClaw runner ─────
+  pytest-init:
+    image: python:3.11-slim
+    container_name: openclaw-pytest-init
+    command:
+      - python
+      - -m
+      - pip
+      - install
+      - --disable-pip-version-check
+      - --no-cache-dir
+      - --index-url
+      - https://packagefeedproxy.microsoft.io/pypi/simple
+      - --target
+      - /opt/pytest
+      - pytest==8.3.5
+    volumes:
+      - pytest-vol:/opt/pytest
+    restart: "no"
+    networks:
+      - harness-net
+
   # ── OpenClaw Gateway ──────────────────────────────────────────────────
   openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.2}
     container_name: openclaw
     depends_on:
       secrets-init:
+        condition: service_completed_successfully
+      pytest-init:
         condition: service_completed_successfully
     ports:
       - "18789:18789"
@@ -31,9 +56,10 @@ services:
       # Force IPv4-style bind, point HOME to a writable location
       HOME: /home/node
     volumes:
-      - ./config:/home/node/.openclaw:rw
+      - config-vol:/home/node/.openclaw:rw
       - ./workspace:/home/node/.openclaw/workspace:rw
       - secrets-vol:/run/secrets:ro
+      - pytest-vol:/opt/pytest:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:18789/health > /dev/null || exit 1"]
       interval: 5s
@@ -71,6 +97,8 @@ services:
       - ./workspace:/workspace:rw
       - secrets-vol:/run/secrets:ro
       # Option A: drive the OpenClaw CLI via `docker exec` from inside the harness.
+      # Under Docker Sandbox this socket belongs to the isolated microVM daemon,
+      # not to the macOS host Docker daemon.
       - /var/run/docker.sock:/var/run/docker.sock
     working_dir: /app
     command: ["python", "-u", "orchestrator.py"]
@@ -79,6 +107,8 @@ services:
       - harness-net
 
 volumes:
+  config-vol:
+  pytest-vol:
   secrets-vol:
     driver: local
     driver_opts:

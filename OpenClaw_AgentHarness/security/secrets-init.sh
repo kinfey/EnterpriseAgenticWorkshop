@@ -6,27 +6,17 @@ set -e
 SECRETS_DIR="/run/secrets"
 TOKEN_FILE="$SECRETS_DIR/gateway-token"
 OPENCLAW_CONFIG="/openclaw-config/openclaw.json"
+OPENCLAW_CONFIG_TEMPLATE="/config-template/openclaw.json"
 
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
+mkdir -p "$(dirname "$OPENCLAW_CONFIG")"
 
-# Idempotency: if the openclaw.json already has a non-placeholder token, reuse
-# it. Rotating while the gateway is still running leaves it with a stale
-# in-memory token and breaks the in-container CLI (which compares
-# gateway.remote.token to the gateway's live gateway.auth.token).
+# Idempotency: reuse the token from the secrets volume while this Compose
+# deployment exists. Removing volumes intentionally rotates it.
 EXISTING_TOKEN=""
 if [ -s "$TOKEN_FILE" ]; then
   EXISTING_TOKEN="$(cat "$TOKEN_FILE")"
-fi
-if [ -z "$EXISTING_TOKEN" ] && [ -f "$OPENCLAW_CONFIG" ]; then
-  apk add --no-cache jq >/dev/null 2>&1 || true
-  if command -v jq >/dev/null 2>&1; then
-    CURR="$(jq -r '.gateway.auth.token // ""' "$OPENCLAW_CONFIG" 2>/dev/null)"
-    case "$CURR" in
-      ""|change_me_to_a_random_secret_string|null) ;;
-      *) EXISTING_TOKEN="$CURR" ;;
-    esac
-  fi
 fi
 
 if [ -n "$EXISTING_TOKEN" ]; then
@@ -38,25 +28,28 @@ else
               head -c 32 /dev/urandom | xxd -p | head -c 48)
 fi
 
-# Sync token into openclaw.json BEFORE writing the secret file so the
-# gateway never reads a stale token.
-if [ -f "$OPENCLAW_CONFIG" ]; then
-  apk add --no-cache jq >/dev/null 2>&1 || true
-  if command -v jq >/dev/null 2>&1; then
-    jq --arg tok "$NEW_TOKEN" '
-      .gateway.auth.token = $tok
-      | .gateway.remote.url = "ws://127.0.0.1:18789"
-      | .gateway.remote.transport = "direct"
-      | .gateway.remote.token = $tok
-    ' "$OPENCLAW_CONFIG" > /tmp/oc.tmp
-    mv /tmp/oc.tmp "$OPENCLAW_CONFIG"
-    echo "[secrets-init] Token synced into openclaw.json (auth + remote)"
-  else
-    # Fallback: sed replacement of the placeholder
-    sed -i "s/change_me_to_a_random_secret_string/${NEW_TOKEN}/" "$OPENCLAW_CONFIG"
-    echo "[secrets-init] Token synced via sed fallback"
-  fi
+# Build the runtime config atomically so a running gateway never observes the
+# placeholder token from the tracked template.
+apk add --no-cache jq >/dev/null 2>&1 || true
+RUNTIME_TMP="/openclaw-config/openclaw.json.tmp"
+if command -v jq >/dev/null 2>&1; then
+  jq --arg tok "$NEW_TOKEN" '
+    .gateway.auth.token = $tok
+    | .gateway.remote.url = "ws://127.0.0.1:18789"
+    | .gateway.remote.transport = "direct"
+    | .gateway.remote.token = $tok
+  ' "$OPENCLAW_CONFIG_TEMPLATE" > "$RUNTIME_TMP"
+  echo "[secrets-init] Token synced into runtime config (auth + remote)"
+else
+  cp "$OPENCLAW_CONFIG_TEMPLATE" "$RUNTIME_TMP"
+  sed -i "s/change_me_to_a_random_secret_string/${NEW_TOKEN}/g" "$RUNTIME_TMP"
+  echo "[secrets-init] Token synced via sed fallback"
 fi
+chown 1000:1000 "$RUNTIME_TMP"
+chmod 600 "$RUNTIME_TMP"
+mv "$RUNTIME_TMP" "$OPENCLAW_CONFIG"
+chown 1000:1000 /openclaw-config
+chmod 700 /openclaw-config
 
 echo "$NEW_TOKEN" > "$TOKEN_FILE"
 chmod 444 "$TOKEN_FILE"

@@ -27,9 +27,9 @@
     "defaults": {
       "workspace": "/home/node/.openclaw/workspace",
       "model": {
-        "primary": "github-copilot/claude-opus-4.7",
+        "primary": "github-copilot/gpt-5.6-sol",
         "fallbacks": [
-          "github-copilot/claude-sonnet-4.5"
+          "github-copilot/gpt-5.5"
         ]
       },
       "sandbox": {
@@ -48,7 +48,7 @@
           "emoji": "🧑‍💻"
         },
         "model": {
-          "primary": "github-copilot/claude-opus-4.7"
+          "primary": "github-copilot/gpt-5.6-sol"
         },
         "systemPromptOverride": "You are Agent A (Coder). Your sole job is to WRITE PRODUCTION-QUALITY PYTHON CODE that satisfies a given specification. Steps:\n1. Read the file `/home/node/.openclaw/workspace/code/SPEC.md` for the requirement.\n2. If `/home/node/.openclaw/workspace/code/RUN_REPORT.md` exists, read it carefully — it contains failure feedback from previous test runs that you must fix.\n3. Write or overwrite `/home/node/.openclaw/workspace/code/solution.py` with a complete, runnable implementation. Include type hints. Do NOT create tests.\n4. After writing, output a short JSON summary: {\"status\":\"done\",\"file\":\"solution.py\",\"notes\":\"...\"}.\nUse only the `read`, `write`, and `edit` tools. Never run code.",
         "tools": {
@@ -73,7 +73,7 @@
           "emoji": "🧪"
         },
         "model": {
-          "primary": "github-copilot/claude-opus-4.7"
+          "primary": "github-copilot/gpt-5.6-sol"
         },
         "systemPromptOverride": "You are Agent B (Tester). Your sole job is to WRITE PYTEST TEST CASES against the implementation produced by the Coder. Steps:\n1. Read `/home/node/.openclaw/workspace/code/SPEC.md` to understand the requirement.\n2. Read `/home/node/.openclaw/workspace/code/solution.py` to see the public API.\n3. Write or overwrite `/home/node/.openclaw/workspace/code/test_solution.py` with rigorous pytest test cases. Cover: happy path, edge cases, invalid input, boundary conditions. Import the module under test as `from solution import ...`. Do NOT modify solution.py.\n4. After writing, output a short JSON summary: {\"status\":\"done\",\"file\":\"test_solution.py\",\"test_count\":N}.\nUse only the `read`, `write`, and `edit` tools. Never run code.",
         "tools": {
@@ -98,7 +98,7 @@
           "emoji": "🏃"
         },
         "model": {
-          "primary": "github-copilot/claude-opus-4.7"
+          "primary": "github-copilot/gpt-5.6-sol"
         },
         "systemPromptOverride": "You are Agent C (Runner). Your sole job is to EXECUTE the pytest suite in the OpenClaw sandbox and report results. Steps:\n1. cd to `/home/node/.openclaw/workspace/code`.\n2. Run: `python -m pytest test_solution.py -v --tb=short` using the `exec` tool. Capture full stdout/stderr.\n3. Parse the result. Determine pass/fail. Count passed/failed tests.\n4. Write a structured report to `/home/node/.openclaw/workspace/code/RUN_REPORT.md` with sections: ## Result (PASS/FAIL), ## Summary (counts), ## Failed Tests (names + assertion messages), ## Suggested Fixes (concrete advice for the Coder).\n5. Output a final JSON line: {\"status\":\"PASS\"|\"FAIL\",\"passed\":N,\"failed\":N,\"report\":\"RUN_REPORT.md\"}.\nUse `read`, `write`, and `exec` tools. The `exec` tool is restricted to the workspace/code directory.",
         "tools": {

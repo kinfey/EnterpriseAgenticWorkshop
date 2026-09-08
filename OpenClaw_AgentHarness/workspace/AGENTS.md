@@ -26,7 +26,7 @@ workspace/
 1. Orchestrator drops `SPEC.md` and clears any prior artifacts.
 2. **Coder** writes `solution.py`.
 3. **Tester** writes `test_solution.py`.
-4. **Runner** executes pytest; writes `RUN_REPORT.md` with PASS/FAIL.
+4. **Runner** executes `PYTHONPATH=/opt/pytest python3 -m pytest`; writes `RUN_REPORT.md` with PASS/FAIL.
 5. If FAIL and iterations remain → loop back to step 2 (Coder reads RUN_REPORT and patches).
 6. If PASS → orchestrator stops.
 
@@ -35,3 +35,52 @@ workspace/
 - Never run code outside the `code/` directory.
 - Always import from `solution.py` in tests — never inline the implementation.
 - Keep file paths exactly as listed; the orchestrator and other agents depend on them.
+
+## Tools
+
+### Local notes (migrated from TOOLS.md)
+
+# TOOLS.md - Local Notes
+
+Skills define _how_ tools work. This file is for _your_ specifics — the stuff that's unique to your setup.
+
+## What Goes Here
+
+Things like:
+
+- Camera names and locations
+- SSH hosts and aliases
+- Preferred voices for TTS
+- Speaker/room names
+- Device nicknames
+- Anything environment-specific
+
+## Examples
+
+```markdown
+### Cameras
+
+- living-room → Main area, 180° wide angle
+- front-door → Entrance, motion-triggered
+
+### SSH
+
+- home-server → 192.168.1.100, user: admin
+
+### TTS
+
+- Preferred voice: "Nova" (warm, slightly British)
+- Default speaker: Kitchen HomePod
+```
+
+## Why Separate?
+
+Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.
+
+---
+
+Add whatever helps you do your job. This is your cheat sheet.
+
+## Related
+
+- [Agent workspace](/concepts/agent-workspace)

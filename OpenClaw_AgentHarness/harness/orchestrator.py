@@ -74,9 +74,10 @@ ITERATION {iteration} of {max_iterations}.
 
 cd /home/node/.openclaw/workspace/code
 
-Run: python -m pytest test_solution.py -v --tb=short
-Capture all output. If pytest is not installed, first run:
-  python -m pip install --quiet pytest
+Run:
+  PYTHONPATH=/opt/pytest python3 -m pytest test_solution.py -v --tb=short
+Capture all output. The read-only /opt/pytest tool volume is provisioned by
+the pytest-init service; do not install packages at runtime.
 
 Write a Markdown report to:
   /home/node/.openclaw/workspace/code/RUN_REPORT.md

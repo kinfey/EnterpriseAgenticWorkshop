@@ -11,7 +11,11 @@ section() { echo -e "\n${BOLD}━━━  $*  ━━━${RESET}"; }
 section "Step 0 — Prerequisites"
 command -v docker >/dev/null 2>&1 || { error "docker not found"; exit 1; }
 docker compose version >/dev/null 2>&1 || { error "docker compose v2 required"; exit 1; }
-info "Docker OK"
+if [ -n "${SANDBOX_NAME:-}" ]; then
+  info "Docker OK (Docker Sandbox: ${SANDBOX_NAME})"
+else
+  warn "Running without Docker Sandbox. Prefer: ./sandbox.sh deploy"
+fi
 
 section "Step 1 — .env"
 if [ ! -f .env ]; then
@@ -23,7 +27,8 @@ else
   warn ".env already exists, skipping"
 fi
 
-if grep -q '^COPILOT_GITHUB_TOKEN=ghu_replace_me' .env; then
+if ! grep -Eq '^COPILOT_GITHUB_TOKEN=.+$' .env \
+  && [ -z "${COPILOT_GITHUB_TOKEN:-}" ]; then
   error "COPILOT_GITHUB_TOKEN is not configured in .env."
   echo "  Edit .env and set COPILOT_GITHUB_TOKEN to your GitHub Copilot token."
   echo "  Tip:  echo \"COPILOT_GITHUB_TOKEN=\$(gh auth token)\" >> .env"
@@ -38,8 +43,10 @@ info "Filesystem permissions set"
 
 section "Step 3 — Pull images"
 docker pull alpine:3.19
+docker pull python:3.11-slim
 docker pull python:3.12-slim
-docker pull openclaw/openclaw:latest || warn "Could not pre-pull openclaw/openclaw — compose will retry on up."
+OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.9.2}"
+docker pull "$OPENCLAW_IMAGE" || warn "Could not pre-pull $OPENCLAW_IMAGE — compose will retry on up."
 
 section "Step 4 — Build harness image"
 docker compose build harness

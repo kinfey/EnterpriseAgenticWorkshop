@@ -2,13 +2,13 @@
 
 > **Agent A writes the code → Agent B writes the tests → Agent C runs them in the OpenClaw sandbox and feeds back the results**
 >
-> Everything is built on the [OpenClaw](https://docs.openclaw.ai/) Docker Gateway and a multi-agent Workspace. The model is **Claude Opus 4.7**, served via GitHub Copilot's built-in provider.
+> Everything runs inside a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) microVM, using the **OpenClaw v2026.9.2** Docker Gateway and **GPT-5.6 Sol** through GitHub Copilot.
 
 ---
 
 ## What it is
 
-A small multi-agent pipeline brought up with Docker Compose. Three non-overlapping agents collaborate through a shared [OpenClaw Workspace](https://docs.openclaw.ai/concepts/agent-workspace) to complete a self-contained code → test → run → feedback loop:
+A small multi-agent pipeline brought up with Docker Compose inside an isolated Docker Sandbox microVM. Three non-overlapping agents collaborate through a shared [OpenClaw Workspace](https://docs.openclaw.ai/concepts/agent-workspace) to complete a self-contained code → test → run → feedback loop:
 
 | Agent | Role | Tools (allowlist) |
 |-------|------|-------------------|
@@ -21,6 +21,7 @@ Only Agent C has the `exec` tool, and `tools.exec.allowedPaths` strictly scopes 
 Reference docs:
 
 - Install: <https://docs.openclaw.ai/install/docker>
+- Docker Sandboxes: <https://docs.docker.com/ai/sandboxes/>
 - Multi-agent sandbox tools: <https://docs.openclaw.ai/tools/multi-agent-sandbox-tools>
 - Workspace concept: <https://docs.openclaw.ai/concepts/agent-workspace>
 - GitHub Copilot provider: <https://docs.openclaw.ai/providers/github-copilot>
@@ -34,13 +35,17 @@ Inspired by: <https://github.com/kinfey/Multi-AI-Agents-Cloud-Native/tree/main/c
 ```
 OpenClaw_AgentHarness/
 ├── README.md                ← this file
-├── docker-compose.yml       ← three containers: secrets-init + openclaw + harness
-├── .env.example             ← copy to .env and fill in COPILOT_GITHUB_TOKEN
+├── README.zh.md             ← Chinese documentation
+├── docker-compose.yml       ← init services + OpenClaw Gateway + harness
+├── sandbox.sh               ← Docker Sandbox deployment and operations
+├── .env.example             ← image, model credential, and loop settings
 ├── setup.sh                 ← one-shot bootstrap
+├── docs/
+│   └── architecture.excalidraw ← editable project architecture diagram
 ├── config/
-│   └── openclaw.json        ← three agents + GitHub Copilot provider + tool allowlists
+│   └── openclaw.json        ← read-only template: agents + Copilot provider + tool allowlists
 ├── security/
-│   └── secrets-init.sh      ← rotates the gateway token on every boot
+│   └── secrets-init.sh      ← prepares runtime config and Gateway token
 ├── workspace/               ← OpenClaw Agent Workspace (mounted at /home/node/.openclaw/workspace inside the container)
 │   ├── AGENTS.md
 │   ├── IDENTITY.md
@@ -55,22 +60,91 @@ OpenClaw_AgentHarness/
 
 ---
 
+## Architecture
+
+The system separates the host control plane from the agent runtime. The host only runs `sbx`; Docker Compose and the Docker Socket live inside the Docker Sandbox microVM.
+
+```mermaid
+flowchart TB
+    User["Developer / Browser"] -->|"sandbox.sh"| Docker
+    User -->|"127.0.0.1:18789"| Gateway
+
+    subgraph SBX["Docker Sandbox microVM"]
+        Docker["Isolated Docker daemon"]
+        Secrets["secrets-init"]
+        Pytest["pytest-init"]
+        Gateway["OpenClaw Gateway<br/>v2026.9.2"]
+        Harness["Harness orchestrator"]
+        ConfigVol[("config-vol")]
+        SecretVol[("secrets-vol tmpfs")]
+        PytestVol[("pytest-vol")]
+        Workspace[("Host workspace bind mount")]
+
+        Docker --> Secrets
+        Docker --> Pytest
+        Docker --> Gateway
+        Docker --> Harness
+        Secrets --> ConfigVol
+        Secrets --> SecretVol
+        Pytest --> PytestVol
+        ConfigVol --> Gateway
+        SecretVol --> Gateway
+        SecretVol --> Harness
+        PytestVol --> Gateway
+        Harness -->|"docker exec + OpenClaw CLI"| Gateway
+        Gateway --> Coder["Agent A: Coder"]
+        Gateway --> Tester["Agent B: Tester"]
+        Gateway --> Runner["Agent C: Runner"]
+        Coder --> Workspace
+        Tester --> Workspace
+        Runner --> Workspace
+        Runner --> PytestVol
+        Harness --> Workspace
+    end
+
+    Gateway -->|"GitHub Copilot API"| Models["GPT-5.6 Sol<br/>fallback: GPT-5.5"]
+```
+
+Editable source: [docs/architecture.excalidraw](docs/architecture.excalidraw).
+
+### Component responsibilities
+
+| Layer | Component | Responsibility |
+|-------|-----------|----------------|
+| Host control plane | `sandbox.sh` | Creates the microVM, applies minimal network policy, forwards port `18789`, and executes lifecycle commands. |
+| Isolation boundary | Docker Sandbox | Provides a dedicated microVM, Docker daemon, filesystem, and network policy. |
+| Initialization | `secrets-init` | Copies the tracked OpenClaw template into `config-vol` and atomically injects the runtime Gateway token. |
+| Initialization | `pytest-init` | Installs pinned `pytest==8.3.5` from the Microsoft PyPI proxy into `pytest-vol`. |
+| Agent runtime | OpenClaw Gateway | Hosts the three agents, enforces their tool profiles, and calls GitHub Copilot GPT models. |
+| Orchestration | Harness | Runs Coder → Tester → Runner, validates output files, parses `RUN_REPORT.md`, and retries failures. |
+| Shared data | `workspace/` | Stores the specification, generated implementation, tests, and run report. |
+
+### Trust and persistence boundaries
+
+- The macOS host exposes only the project workspace and forwarded port `18789` to the microVM.
+- `/var/run/docker.sock` belongs to the microVM's Docker daemon; the harness cannot control host containers.
+- `config/openclaw.json` is a credential-free template. The live token exists only in the runtime volumes.
+- `secrets-vol` is tmpfs-backed; `config-vol` and `pytest-vol` persist while the Compose volumes exist.
+- Only Runner can execute commands. Coder and Tester are limited to workspace file operations.
+
+---
+
 ## A complete run
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │  iteration N                                                        │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:coder)   │
+│  orchestrator → docker exec → OpenClaw CLI --agent coder            │
 │      ↳ Agent A reads SPEC.md (+ previous RUN_REPORT.md) → writes    │
 │        solution.py                                                  │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:tester)  │
+│  orchestrator → docker exec → OpenClaw CLI --agent tester           │
 │      ↳ Agent B reads SPEC.md + solution.py → writes                 │
 │        test_solution.py                                             │
 │                                                                     │
-│  orchestrator → POST /v1/chat/completions  (model=openclaw:runner)  │
-│      ↳ Agent C runs `pytest -v` inside the sandbox                  │
+│  orchestrator → docker exec → OpenClaw CLI --agent runner           │
+│      ↳ Agent C runs pytest from the read-only /opt/pytest volume    │
 │        → writes RUN_REPORT.md (PASS / FAIL + Suggested Fixes)       │
 │                                                                     │
 │  orchestrator parses the report:                                    │
@@ -82,36 +156,74 @@ OpenClaw_AgentHarness/
 
 ---
 
-## Quick start
+## Versions
 
-### 1. Get a GitHub Copilot token
+| Component | Version / model |
+|-----------|-----------------|
+| OpenClaw | `v2026.9.2` |
+| Docker Sandboxes | `v0.42.1` or later |
+| GitHub Copilot model | `github-copilot/gpt-5.6-sol` |
+| Fallback model | `github-copilot/gpt-5.5` |
 
-OpenClaw's [github-copilot provider](https://docs.openclaw.ai/providers/github-copilot) defaults to `github-copilot/claude-opus-4.7`. Obtain a GitHub token that has Copilot access:
+OpenClaw uses date-based release numbers rather than SemVer. There is no official `2.0` image tag; this repository treats the current stable `v2026.9.2` release as the requested 2.0 upgrade target and pins the image to avoid unreviewed `latest` upgrades.
+
+## Quick start with Docker Sandbox
+
+### 1. Install or upgrade Docker Sandboxes
+
+Docker Sandboxes on macOS requires Apple silicon and macOS 14 or later.
+
+```bash
+brew trust docker/tap
+brew install docker/tap/sbx
+# Existing installation:
+brew upgrade docker/tap/sbx
+sbx login
+```
+
+Docker Desktop is not required for `sbx`. Each sandbox has its own Docker daemon, filesystem, and network.
+
+### 2. Get a GitHub Copilot token
+
+OpenClaw's [github-copilot provider](https://docs.openclaw.ai/providers/github-copilot) uses `github-copilot/gpt-5.6-sol`. Obtain a GitHub token that has Copilot access:
 
 ```bash
 # Easiest path if you already have gh CLI installed and signed in:
 gh auth token
 ```
 
-### 2. Configure .env
+The deployment script reads `COPILOT_GITHUB_TOKEN` from the environment, or securely invokes `gh auth token` without printing the token.
 
 ```bash
 cd OpenClaw_AgentHarness
-cp .env.example .env
-# Edit .env and fill in:
-#   COPILOT_GITHUB_TOKEN=<the token from the previous step>
+export COPILOT_GITHUB_TOKEN="$(gh auth token)"
 ```
 
-### 3. Bootstrap
+Model availability depends on the GitHub Copilot plan and organization policy. The account must have access to GPT-5.6 Sol.
+
+### 3. Deploy locally
 
 ```bash
-chmod +x setup.sh && ./setup.sh
+chmod +x setup.sh sandbox.sh security/secrets-init.sh
+./sandbox.sh deploy
+```
+
+This creates a sandbox named `openclaw-agent-harness`, allocates 4 CPUs and 8 GiB RAM, publishes port `18789`, adds narrowly scoped egress rules for the Microsoft Python package proxy, builds the harness image, and starts the OpenClaw Gateway. Open the Control UI at:
+
+```bash
+http://127.0.0.1:18789/
+```
+
+Override sandbox resources when needed:
+
+```bash
+OPENCLAW_SANDBOX_CPUS=6 OPENCLAW_SANDBOX_MEMORY=12g ./sandbox.sh deploy
 ```
 
 ### 4. Run one pipeline
 
 ```bash
-docker compose up --abort-on-container-exit harness
+./sandbox.sh run
 ```
 
 Expected log:
@@ -136,13 +248,25 @@ In the end, `workspace/code/` will contain:
 
 ### 5. Try a different task
 
-Edit [workspace/code/SPEC.md](workspace/code/SPEC.md), delete `solution.py / test_solution.py / RUN_REPORT.md`, and re-run step 4.
+Edit [workspace/code/SPEC.md](workspace/code/SPEC.md), delete `solution.py / test_solution.py / RUN_REPORT.md`, and run `./sandbox.sh run` again.
+
+### Operations
+
+| Command | Purpose |
+|---------|---------|
+| `./sandbox.sh status` | Show the microVM and Compose services |
+| `./sandbox.sh dashboard` | Copy the Gateway token and open the authenticated Control UI |
+| `./sandbox.sh logs` | Follow OpenClaw Gateway logs |
+| `./sandbox.sh shell` | Open a shell inside the microVM |
+| `./sandbox.sh down` | Stop Compose services but retain the microVM |
+| `sbx stop openclaw-agent-harness` | Stop the microVM |
+| `sbx rm openclaw-agent-harness` | Delete the microVM and its internal images |
 
 ---
 
 ## Key design points
 
-### Model — Claude Opus 4.7
+### Model — GitHub Copilot GPT-5.6 Sol
 
 In `config/openclaw.json`:
 
@@ -150,33 +274,36 @@ In `config/openclaw.json`:
 "agents": {
   "defaults": {
     "model": {
-      "primary": "github-copilot/claude-opus-4.7",
-      "fallbacks": ["github-copilot/claude-sonnet-4.5"]
+      "primary": "github-copilot/gpt-5.6-sol",
+      "fallbacks": ["github-copilot/gpt-5.5"]
     }
   }
 }
 ```
 
-The provider-level configuration uses OpenClaw's built-in `github-copilot` plugin. Authentication comes from the `COPILOT_GITHUB_TOKEN` environment variable (also mirrored to `GH_TOKEN` to match the plugin's multi-source detection order).
+The provider-level configuration uses OpenClaw's built-in `github-copilot` plugin. Authentication comes from the `COPILOT_GITHUB_TOKEN` environment variable (also mirrored to `GH_TOKEN` to match the plugin's multi-source detection order). GPT models use OpenClaw's OpenAI Responses transport.
 
-### Tool allowlist — scoped to a single directory
+### Agent tool separation
 
 ```json
-"tools": {
-  "exec":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace/code"] },
-  "read":  { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "write": { "enabled": true, "allowedPaths": ["/home/node/.openclaw/workspace"] },
-  "browser":   { "enabled": false },
-  "web_search":{ "enabled": false },
-  "web_fetch": { "enabled": false }
+"agents": {
+  "entries": {
+    "coder":  { "tools": { "deny": ["exec", "process", "browser"] } },
+    "tester": { "tools": { "deny": ["exec", "process", "browser"] } },
+    "runner": { "tools": { "deny": ["process", "browser", "edit"] } }
+  }
 }
 ```
 
-Each agent is then further restricted via `agents.list[].tools.allow / deny`, which guarantees that the Coder/Tester cannot acquire `exec`, and the Runner cannot acquire `edit` / `apply_patch`.
+OpenClaw 2026.9.2 uses keyed `agents.entries`. Coder and Tester cannot execute processes; Runner can execute pytest but cannot edit the implementation through the `edit` or `apply_patch` tools.
 
-### Token rotation at startup
+### Runtime configuration and token handling
 
-The `security/secrets-init.sh` container runs once before any other service. It generates a fresh 64-character random gateway token, writes it to the `tmpfs` volume `/run/secrets/gateway-token`, and uses `jq` to inject it into the `gateway.auth.token` field of `config/openclaw.json`. The harness container mounts the same tmpfs volume read-only to read the token; the OpenClaw container also mounts it read-only and is configured with `OPENCLAW_TOKEN_FILE=/run/secrets/gateway-token`.
+The `security/secrets-init.sh` container runs before the Gateway. It copies the tracked `config/openclaw.json` template into `config-vol`, reuses the token while `secrets-vol` exists, and atomically injects it into the runtime copy. Live credentials are never written back into the Git working tree.
+
+### Docker Sandbox isolation
+
+The Compose stack runs inside a Docker Sandbox microVM instead of directly against the host Docker daemon. The harness still mounts `/var/run/docker.sock` so it can call the OpenClaw CLI with `docker exec`, but that socket now belongs to the sandbox's isolated Docker daemon and cannot control host containers.
 
 ### Workspace = single source of truth
 
@@ -187,21 +314,36 @@ The host `./workspace/` directory is bind-mounted into both:
 
 This means `orchestrator.py` can immediately verify, from the host's view, that an agent actually produced its output file.
 
+### Reproducible pytest runtime
+
+`pytest-init` installs `pytest==8.3.5` into `pytest-vol` before OpenClaw starts. Runner executes:
+
+```bash
+PYTHONPATH=/opt/pytest python3 -m pytest test_solution.py -v --tb=short
+```
+
+The agent therefore does not install packages dynamically and cannot mutate the test toolchain.
+
 ---
 
 ## Troubleshooting
 
 | Symptom | What to check |
 |---------|---------------|
-| `harness` is stuck at `Waiting for gateway` | Run `docker logs openclaw` and confirm the healthcheck returns 200. Usually `COPILOT_GITHUB_TOKEN` is missing or expired. |
-| `agent 'coder' HTTP 401` | Token rotation is out of sync. Reset the tmpfs volume with `docker compose down -v && ./setup.sh`. |
-| Runner reports `pytest not found` | The Runner prompt already falls back to `pip install pytest`. If it still fails, confirm `tools.exec.enabled=true` and that the Runner has not had `exec` denied in `agents.list[]`. |
-| Model not found | Confirm your GitHub account's Copilot subscription can access `claude-opus-4.7`. Otherwise change `agents.defaults.model.primary` to `github-copilot/claude-sonnet-4.5`, or run `docker compose exec openclaw openclaw models auth login --provider github-copilot --method device` once. |
+| `harness` is stuck at `Waiting for gateway` | Run `./sandbox.sh logs` and confirm the healthcheck returns 200. Usually `COPILOT_GITHUB_TOKEN` is missing or expired. |
+| Control UI reports `gateway token missing` | Run `./sandbox.sh dashboard`; it copies the runtime token and opens an authenticated URL. |
+| `agent 'coder' HTTP 401` | Token state is out of sync. Run `./sandbox.sh down && ./sandbox.sh deploy` to recreate the Gateway from the runtime config. |
+| Runner reports `pytest not found` | Re-run `./sandbox.sh deploy`. The `pytest-init` service installs pinned pytest into the read-only `/opt/pytest` tool volume before OpenClaw starts. |
+| Model not found | Confirm the Copilot account and organization policy allow `gpt-5.6-sol`. Inspect the live catalog with `sbx exec openclaw-agent-harness docker exec openclaw node /app/openclaw.mjs models list`. |
+| `sbx` cannot start | Confirm Apple silicon, macOS 14+, `sbx login`, and at least 8 GiB free memory. |
 
 ---
 
 ## Shutdown
 
 ```bash
-docker compose down -v   # -v also wipes the old token from the secrets volume
+./sandbox.sh down
+sbx stop openclaw-agent-harness
 ```
+
+To remove all sandbox state, run `sbx rm openclaw-agent-harness`.
