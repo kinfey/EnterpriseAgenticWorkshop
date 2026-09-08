@@ -61,6 +61,7 @@ exec_with_token() {
   token="$(copilot_token)"
   sbx exec \
     -e "COPILOT_GITHUB_TOKEN=$token" \
+    -e "MAX_ITERATIONS=${MAX_ITERATIONS:-4}" \
     -w "$PROJECT_DIR" \
     "$SANDBOX_NAME" "$@"
 }

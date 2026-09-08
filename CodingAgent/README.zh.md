@@ -295,9 +295,188 @@ Docker Sandboxes 为项目提供：
 
 官方文档：[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)。
 
-## OpenCode MCP 集成
+## GitHub Copilot CLI MCP 集成
 
-现有 `opencode.json` 与 `mcp/mcp_server.py` 可将流水线暴露给 OpenCode。先部署 Sandbox，再从当前目录启动 OpenCode。命令行验证仍建议使用：
+可重复执行的安装脚本 `mcp/install_copilot_cli.sh` 会将 `codingagent` 注册到当前用户的 GitHub Copilot CLI 配置。`mcp/run_server.sh` 启动 stdio MCP Server，并提供：
+
+| MCP 工具 | 用途 |
+|----------|------|
+| `codingagent_list_skills` | 列出可用 Skill 文档 |
+| `codingagent_read_skill` | 读取指定 Skill |
+| `codingagent_add_skill` | 新增或替换 Skill |
+| `codingagent_generate` | 写入 SPEC，并执行完整 Docker Sandbox 自修复流水线 |
+
+### 绑定流程
+
+1. 安装 Python MCP SDK。
+2. 在 Docker Sandbox 中部署 OpenClaw。
+3. 执行 `mcp/install_copilot_cli.sh`。
+4. 安装脚本使用 Launcher 的绝对路径替换旧的 `codingagent` 注册。
+5. Copilot CLI 需要 MCP 工具时，将 `mcp/run_server.sh` 作为本地 stdio 进程启动。
+6. Launcher 设置 `CODINGAGENT_ROOT` 并启动 `mcp/mcp_server.py`。
+7. `codingagent_generate` 写入用户提供的 SPEC，然后调用 `sandbox.sh run`。
+8. `sandbox.sh` 将迭代次数和 Copilot 凭据传入 microVM，由临时 Harness 驱动 OpenClaw。
+
+```mermaid
+flowchart LR
+    Prompt["Copilot CLI Prompt"] --> Config["~/.copilot/mcp-config.json"]
+    Config --> Launcher["mcp/run_server.sh"]
+    Launcher --> Server["mcp/mcp_server.py<br/>stdio MCP"]
+    Server --> Control["sandbox.sh run"]
+    Control --> SBX["Docker Sandbox microVM"]
+    SBX --> Harness["Harness 容器"]
+    Harness --> Gateway["OpenClaw 2.0"]
+    Gateway --> Agents["Coder → Runner → Diagnoser"]
+    Agents --> Output["workspace/code/*"]
+    Output --> Server
+    Server --> Prompt
+```
+
+### 安装与绑定
+
+如果本机尚未安装 Python MCP SDK，请通过 Microsoft 包源安装：
+
+```bash
+python3 -m pip install \
+  --index-url https://packagefeedproxy.microsoft.io/pypi/simple \
+  -r mcp/requirements.txt
+```
+
+安装或刷新 Copilot CLI 注册：
+
+```bash
+chmod +x mcp/install_copilot_cli.sh mcp/run_server.sh
+./mcp/install_copilot_cli.sh
+```
+
+安装脚本等价执行：
+
+```bash
+copilot mcp remove codingagent  # 没有旧注册时忽略
+copilot mcp add --tools '*' codingagent -- /path/to/CodingAgent/mcp/run_server.sh
+```
+
+Copilot CLI 会保存类似下面的用户级配置：
+
+```json
+{
+  "mcpServers": {
+    "codingagent": {
+      "type": "local",
+      "command": "/path/to/CodingAgent/mcp/run_server.sh",
+      "args": [],
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+配置中不保存 GitHub Token 或 Gateway Token。执行生成工具时，`sandbox.sh` 从进程环境读取 `COPILOT_GITHUB_TOKEN`；未设置时，通过 `gh auth token` 安全获取。
+
+确认 Copilot CLI 已发现服务：
+
+```bash
+copilot mcp list
+copilot mcp get codingagent
+```
+
+调用生成工具前先启动 OpenClaw 服务：
+
+```bash
+./sandbox.sh deploy
+```
+
+### 交互模式调用
+
+从 `CodingAgent/` 启动 Copilot CLI：
+
+```bash
+copilot
+```
+
+进入交互模式后查看服务：
+
+```text
+/mcp show codingagent
+```
+
+列出可用 Skill：
+
+```text
+请调用 codingagent_list_skills 一次，并返回所有可用 Skill。
+```
+
+执行代码生成：
+
+```text
+请调用 codingagent_generate，实现一个线程安全的 LRU Cache。
+
+要求：
+- 引用 @PYTHON_STYLE.md、@ALGO_PATTERNS.md 和 @ERROR_HANDLING.md。
+- max_iterations 设置为 4。
+- 执行流水线直到 PASS。
+- 返回 solution.py 和 RUN_LOG.md。
+```
+
+Copilot 会根据 Prompt 选择 MCP 工具。明确写出 `codingagent_generate`，可以避免该请求被当作普通的 CLI 内部编码任务处理。
+
+### 非交互模式调用
+
+在 Shell 中列出 Skill：
+
+```bash
+copilot --allow-all-tools --no-remote -p \
+  "Call codingagent_list_skills exactly once. Return only the tool result."
+```
+
+执行完整代码生成流水线：
+
+```bash
+copilot --allow-all-tools --no-remote -p '
+Call codingagent_generate exactly once with max_iterations=4.
+
+Implement fibonacci(n: int) -> int.
+Reference @PYTHON_STYLE.md and @TESTING.md.
+Reject negative values with ValueError.
+Include a Smoke Test and run until PASS.
+Return the Pipeline Result and solution.py.
+'
+```
+
+非交互模式需要 `--allow-all-tools`，让 Copilot 无需显示确认界面即可调用 MCP。`--no-remote` 用于保持 CLI Session 在本地运行。
+
+### MCP 生成产物
+
+`codingagent_generate` 会替换 `workspace/code/` 下当前任务相关文件：
+
+- `SPEC.md`
+- `solution.py`
+- `smoke_test.py` 或 `test_solution.py`
+- `RUN_LOG.md`
+- 失败迭代需要修复时生成的 `DIAGNOSIS.md`
+
+请串行调用 MCP 生成工具。多个并发调用会共享同一个 Workspace，可能互相覆盖任务和产物。
+
+当前部署已经通过 Copilot CLI 实际调用 `codingagent_list_skills` 和 `codingagent_generate`；完整 Docker Sandbox 生成测试结果为 `PASS`。
+
+### MCP Server 实现
+
+`mcp/mcp_server.py` 使用 Python MCP SDK 和 stdio Transport，不会开放网络监听端口。
+
+| 实现阶段 | 行为 |
+|----------|------|
+| 工具发现 | 通过 MCP `list_tools` 返回 4 个工具 Schema |
+| Skill 校验 | 在 `workspace/skills/` 中解析 `@FILE.md`，并报告缺失引用 |
+| 运行准备 | 删除旧生成产物，并写入新的 `workspace/code/SPEC.md` |
+| Sandbox 执行 | 按请求的 `MAX_ITERATIONS` 和 Timeout 执行 `sandbox.sh run` |
+| 结果解析 | 读取 `RUN_LOG.md` 判断 `PASS` 或 `FAIL`，并收集 `solution.py` 与 `DIAGNOSIS.md` |
+| MCP 返回 | 通过 MCP Text Content 返回流水线结果和生成文件 |
+
+MCP 进程必须运行在宿主机，是因为 Copilot CLI 通过 stdin/stdout 与它通信。真正的代码执行、容器、Docker Volume 和 Docker Socket 仍全部位于 Docker Sandbox microVM 内。
+
+现有 `opencode.json` 仍可让 OpenCode 使用同一 MCP Server。两个客户端现在都调用 `sandbox.sh run`，不会直接操作宿主机 Docker daemon。
+
+命令行仍可直接执行：
 
 ```bash
 ./sandbox.sh run
@@ -310,6 +489,9 @@ Docker Sandboxes 为项目提供：
 | `sbx` 无法启动 | 确认 Apple silicon、macOS 14+、已执行 `sbx login` 且内存充足 |
 | Gateway 健康检查失败 | 执行 `./sandbox.sh logs` 查看 OpenClaw 启动日志 |
 | Copilot 鉴权失败 | 检查 `gh auth status`，并确认账户具有 Copilot 权限 |
+| 找不到 `codingagent` | 执行 `./mcp/install_copilot_cli.sh`，再运行 `copilot mcp get codingagent` |
+| MCP 进程无法导入 `mcp` | 使用文档指定的 Microsoft Python 包源安装 `mcp/requirements.txt` |
+| Copilot 没有调用工具 | 在 Prompt 中明确写出 `codingagent_generate` 或 `codingagent_list_skills` |
 | 模型不存在 | 检查实时模型目录，并确认组织策略允许 GPT-5.6 Sol |
 | Harness 无法访问 Docker | 重建 Sandbox，确认挂载的是 microVM 内部 Socket |
 | `18790` 端口被占用 | 停止冲突进程，或修改 `sandbox.sh` 中的端口转发 |

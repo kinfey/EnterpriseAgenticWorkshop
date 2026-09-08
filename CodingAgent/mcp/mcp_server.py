@@ -1,6 +1,6 @@
 """
 mcp_server.py — Expose the CodingAgent pipeline as a stdio MCP server so
-OpenCode (or any MCP-aware client) can invoke it as a tool.
+GitHub Copilot CLI, OpenCode, or any MCP-aware client can invoke it as a tool.
 
 Tools:
   - codingagent_generate(spec, skills?, max_iterations?)
@@ -15,10 +15,9 @@ Tools:
         Drop a new Skill document into workspace/skills/ so future SPEC.md
         files can reference it via @<name>.md.
 
-This server is meant to run on the HOST (not inside the harness container).
-It shells out to `docker compose` to drive the pipeline, which keeps token
-rotation, sandboxing, and gateway lifecycle exactly as defined by
-docker-compose.yml.
+This stdio server runs on the host and delegates execution to `sandbox.sh`.
+The actual Compose stack and Docker socket remain inside the Docker Sandbox
+microVM.
 """
 
 from __future__ import annotations
@@ -39,7 +38,7 @@ WORKSPACE = PROJECT_ROOT / "workspace"
 CODE_DIR = WORKSPACE / "code"
 SKILLS_DIR = WORKSPACE / "skills"
 
-COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
+SANDBOX_SCRIPT = PROJECT_ROOT / "sandbox.sh"
 SKILL_REF_RE = re.compile(r"@([A-Za-z0-9_\-]+\.md)")
 
 
@@ -71,17 +70,10 @@ def _validate_skill_refs(spec: str) -> tuple[list[str], list[str]]:
 
 
 def _run_pipeline(max_iterations: int, timeout: int) -> tuple[int, str]:
-    """Run `docker compose up --abort-on-container-exit harness`."""
+    """Run the pipeline through the Docker Sandbox control script."""
     env = os.environ.copy()
     env["MAX_ITERATIONS"] = str(max_iterations)
-    cmd = [
-        "docker", "compose",
-        "-f", str(COMPOSE_FILE),
-        "up",
-        "--abort-on-container-exit",
-        "--exit-code-from", "harness",
-        "harness",
-    ]
+    cmd = [str(SANDBOX_SCRIPT), "run"]
     try:
         proc = subprocess.run(
             cmd,
@@ -93,7 +85,7 @@ def _run_pipeline(max_iterations: int, timeout: int) -> tuple[int, str]:
             check=False,
         )
     except subprocess.TimeoutExpired as e:
-        return 124, f"docker compose timed out after {timeout}s\n{e.stdout or ''}\n{e.stderr or ''}"
+        return 124, f"Docker Sandbox pipeline timed out after {timeout}s\n{e.stdout or ''}\n{e.stderr or ''}"
     return proc.returncode, (proc.stdout or "") + "\n" + (proc.stderr or "")
 
 
@@ -236,7 +228,7 @@ async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
         status = m.group(1).upper() if m else ("PASS" if rc == 0 else "FAIL")
 
         report = [
-            f"## Pipeline Result\n{status}  (compose exit={rc})",
+            f"## Pipeline Result\n{status}  (sandbox exit={rc})",
             f"## Skill References\nresolved: {resolved or '(none)'}"
             + (f"\nmissing: {missing}" if missing else ""),
             "## solution.py\n```python\n" + (solution or "(not produced)") + "\n```",
@@ -245,7 +237,7 @@ async def _call_tool(name: str, arguments: dict) -> list[TextContent]:
         ]
         if status != "PASS":
             tail = "\n".join(log.strip().splitlines()[-40:])
-            report.append("## Compose Log (tail)\n```\n" + tail + "\n```")
+            report.append("## Sandbox Log (tail)\n```\n" + tail + "\n```")
         return [TextContent(type="text", text="\n\n".join(report))]
 
     return [TextContent(type="text", text=f"ERROR: unknown tool '{name}'")]

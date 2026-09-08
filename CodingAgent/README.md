@@ -295,9 +295,188 @@ The project directory is mounted at the same absolute path inside the microVM. C
 
 See the official [Docker Sandboxes documentation](https://docs.docker.com/ai/sandboxes/).
 
-## OpenCode MCP integration
+## GitHub Copilot CLI MCP integration
 
-The existing `opencode.json` and `mcp/mcp_server.py` expose the pipeline to OpenCode. Run OpenCode from this directory after deploying the sandbox. Direct command-line execution remains the recommended validation path:
+The repeatable installer `mcp/install_copilot_cli.sh` registers `codingagent` in the current user's GitHub Copilot CLI configuration. The stdio server is launched by `mcp/run_server.sh` and exposes:
+
+| MCP tool | Purpose |
+|----------|---------|
+| `codingagent_list_skills` | List available Skill documents |
+| `codingagent_read_skill` | Read one Skill document |
+| `codingagent_add_skill` | Add or replace a Skill document |
+| `codingagent_generate` | Write a SPEC and run the complete Docker Sandbox self-correction pipeline |
+
+### Binding flow
+
+1. Install the Python MCP SDK.
+2. Deploy OpenClaw in Docker Sandbox.
+3. Run `mcp/install_copilot_cli.sh`.
+4. The installer replaces any stale `codingagent` registration with the absolute launcher path.
+5. Copilot CLI starts `mcp/run_server.sh` as a local stdio process when an MCP tool is needed.
+6. The launcher sets `CODINGAGENT_ROOT` and starts `mcp/mcp_server.py`.
+7. `codingagent_generate` writes the requested SPEC and calls `sandbox.sh run`.
+8. `sandbox.sh` passes the iteration limit and Copilot credential into the microVM, where the ephemeral Harness drives OpenClaw.
+
+```mermaid
+flowchart LR
+    Prompt["Copilot CLI Prompt"] --> Config["~/.copilot/mcp-config.json"]
+    Config --> Launcher["mcp/run_server.sh"]
+    Launcher --> Server["mcp/mcp_server.py<br/>stdio MCP"]
+    Server --> Control["sandbox.sh run"]
+    Control --> SBX["Docker Sandbox microVM"]
+    SBX --> Harness["Harness container"]
+    Harness --> Gateway["OpenClaw 2.0"]
+    Gateway --> Agents["Coder → Runner → Diagnoser"]
+    Agents --> Output["workspace/code/*"]
+    Output --> Server
+    Server --> Prompt
+```
+
+### Install and bind
+
+Install the Python MCP SDK from the Microsoft package source if it is not already available:
+
+```bash
+python3 -m pip install \
+  --index-url https://packagefeedproxy.microsoft.io/pypi/simple \
+  -r mcp/requirements.txt
+```
+
+Install or refresh the Copilot CLI registration:
+
+```bash
+chmod +x mcp/install_copilot_cli.sh mcp/run_server.sh
+./mcp/install_copilot_cli.sh
+```
+
+The installer executes the equivalent of:
+
+```bash
+copilot mcp remove codingagent  # ignored when no previous registration exists
+copilot mcp add --tools '*' codingagent -- /path/to/CodingAgent/mcp/run_server.sh
+```
+
+Copilot CLI persists a user-level entry similar to:
+
+```json
+{
+  "mcpServers": {
+    "codingagent": {
+      "type": "local",
+      "command": "/path/to/CodingAgent/mcp/run_server.sh",
+      "args": [],
+      "tools": ["*"]
+    }
+  }
+}
+```
+
+The configuration contains no GitHub or Gateway token. `sandbox.sh` reads `COPILOT_GITHUB_TOKEN` from the process environment or securely obtains it through `gh auth token` when a generation tool runs.
+
+Confirm discovery:
+
+```bash
+copilot mcp list
+copilot mcp get codingagent
+```
+
+Start the OpenClaw service before invoking generation:
+
+```bash
+./sandbox.sh deploy
+```
+
+### Interactive invocation
+
+Start Copilot CLI from `CodingAgent/`:
+
+```bash
+copilot
+```
+
+Inside the interactive session, inspect the server:
+
+```text
+/mcp show codingagent
+```
+
+List the available skills:
+
+```text
+Call codingagent_list_skills exactly once and return the available skills.
+```
+
+Run code generation:
+
+```text
+Call codingagent_generate to implement a thread-safe LRU cache.
+
+Requirements:
+- Reference @PYTHON_STYLE.md, @ALGO_PATTERNS.md, and @ERROR_HANDLING.md.
+- Set max_iterations to 4.
+- Run the pipeline until PASS.
+- Return solution.py and RUN_LOG.md.
+```
+
+Copilot selects the MCP tool from the prompt. Naming `codingagent_generate` explicitly prevents the request from being handled as a normal in-process coding task.
+
+### Non-interactive invocation
+
+List skills from a shell:
+
+```bash
+copilot --allow-all-tools --no-remote -p \
+  "Call codingagent_list_skills exactly once. Return only the tool result."
+```
+
+Run a complete generation pipeline:
+
+```bash
+copilot --allow-all-tools --no-remote -p '
+Call codingagent_generate exactly once with max_iterations=4.
+
+Implement fibonacci(n: int) -> int.
+Reference @PYTHON_STYLE.md and @TESTING.md.
+Reject negative values with ValueError.
+Include a Smoke Test and run until PASS.
+Return the Pipeline Result and solution.py.
+'
+```
+
+`--allow-all-tools` is required in non-interactive mode so Copilot can approve the MCP call without displaying a confirmation prompt. `--no-remote` keeps the CLI session local.
+
+### MCP-generated files
+
+`codingagent_generate` replaces the active files under `workspace/code/`:
+
+- `SPEC.md`
+- `solution.py`
+- `smoke_test.py` or `test_solution.py`
+- `RUN_LOG.md`
+- `DIAGNOSIS.md` when a failed iteration requires correction
+
+Use the MCP generation tool serially. Concurrent calls share the same workspace and can overwrite each other's task and output files.
+
+The deployed integration has been exercised through Copilot CLI with both `codingagent_list_skills` and `codingagent_generate`; the full Docker Sandbox generation test completed with `PASS`.
+
+### MCP server implementation
+
+`mcp/mcp_server.py` uses the Python MCP SDK and stdio transport. It does not open a network listener.
+
+| Implementation stage | Behavior |
+|----------------------|----------|
+| Tool discovery | Returns the four tool schemas through MCP `list_tools` |
+| Skill validation | Resolves `@FILE.md` references against `workspace/skills/` and reports missing references |
+| Run preparation | Removes stale generated artifacts and writes the new `workspace/code/SPEC.md` |
+| Sandbox execution | Runs `sandbox.sh run` with the requested `MAX_ITERATIONS` and timeout |
+| Result parsing | Reads `RUN_LOG.md`, determines `PASS` or `FAIL`, and collects `solution.py` and `DIAGNOSIS.md` |
+| MCP response | Returns the pipeline result and generated files as MCP text content |
+
+The MCP process runs on the host only because Copilot CLI communicates with it over stdin/stdout. All code execution, containers, Docker volumes, and the Docker socket remain inside the Docker Sandbox microVM.
+
+The existing `opencode.json` continues to expose the same MCP server to OpenCode. Both clients now call `sandbox.sh run`; neither invokes the host Docker daemon directly.
+
+Direct command-line execution remains available:
 
 ```bash
 ./sandbox.sh run
@@ -310,6 +489,9 @@ The existing `opencode.json` and `mcp/mcp_server.py` expose the pipeline to Open
 | `sbx` cannot start | Confirm Apple silicon, macOS 14+, `sbx login`, and sufficient memory |
 | Gateway health check fails | Run `./sandbox.sh logs` and inspect OpenClaw startup |
 | Copilot authentication fails | Confirm `gh auth status` and that the account has Copilot access |
+| `codingagent` is not listed | Run `./mcp/install_copilot_cli.sh`, then check `copilot mcp get codingagent` |
+| MCP process cannot import `mcp` | Install `mcp/requirements.txt` with the documented Microsoft Python package source |
+| Copilot does not call the tool | Name `codingagent_generate` or `codingagent_list_skills` explicitly in the prompt |
 | Model not found | Inspect the live catalog inside the microVM and verify organization policy permits GPT-5.6 Sol |
 | Harness cannot access Docker | Recreate the sandbox; the mounted socket must belong to the microVM daemon |
 | Port `18790` is unavailable | Stop the conflicting process or set a different published port in `sandbox.sh` |
