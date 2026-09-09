@@ -6,7 +6,7 @@ python3 smoke_test.py
 0
 ## Stdout
 ```
-OK
+Smoke tests passed.
 ```
 ## Stderr / Traceback
 ```

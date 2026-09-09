@@ -1,73 +1,26 @@
-"""Provide an O(1) least-recently-used cache."""
+"""Provide an efficient Fibonacci number implementation."""
 from __future__ import annotations
 
-from collections import OrderedDict
-from typing import Any
 
+def fibonacci(n: int) -> int:
+    """Return the Fibonacci number at a validated non-negative index.
 
-class LRUCache:
-    """Store a fixed number of values using least-recently-used eviction."""
+    Args:
+        n: The zero-based index in the Fibonacci sequence.
 
-    def __init__(self, capacity: int) -> None:
-        """Initialize a cache with the requested capacity.
+    Returns:
+        The Fibonacci number at index ``n``.
 
-        Args:
-            capacity: Maximum number of entries the cache may hold.
+    Raises:
+        TypeError: If ``n`` is not an integer or is a boolean.
+        ValueError: If ``n`` is negative.
+    """
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise TypeError("n must be an integer")
+    if n < 0:
+        raise ValueError("n must be non-negative")
 
-        Returns:
-            None.
-        """
-        # O(1) time, O(1) space.
-        if type(capacity) is not int or capacity <= 0:
-            raise ValueError("capacity must be a positive integer")
-
-        self._capacity = capacity
-        self._items: OrderedDict[Any, Any] = OrderedDict()
-
-    def get(self, key: Any) -> Any:
-        """Return a cached value and mark its key as most recently used.
-
-        Args:
-            key: Key whose cached value should be retrieved.
-
-        Returns:
-            The cached value when present; otherwise, -1.
-        """
-        # O(1) average time, O(1) space.
-        if key not in self._items:
-            return -1
-
-        self._items.move_to_end(key)
-        return self._items[key]
-
-    def put(self, key: Any, value: Any) -> None:
-        """Insert or update a value and evict the least-recently-used entry.
-
-        Args:
-            key: Key to insert or update.
-            value: Value to associate with the key.
-
-        Returns:
-            None.
-        """
-        # O(1) average time, O(1) auxiliary space.
-        if key in self._items:
-            self._items.move_to_end(key)
-        self._items[key] = value
-
-        if len(self._items) > self._capacity:
-            self._items.popitem(last=False)
-
-
-if __name__ == "__main__":
-    c = LRUCache(2)
-    c.put(1, 1)
-    c.put(2, 2)
-    assert c.get(1) == 1
-    c.put(3, 3)
-    assert c.get(2) == -1
-    c.put(4, 4)
-    assert c.get(1) == -1
-    assert c.get(3) == 3
-    assert c.get(4) == 4
-    print("OK")
+    previous, current = 0, 1
+    for _ in range(n):
+        previous, current = current, previous + current
+    return previous
